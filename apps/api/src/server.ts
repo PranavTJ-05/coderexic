@@ -1,14 +1,23 @@
 import { randomUUID } from 'node:crypto';
-import type { Logger } from '@coderexic/core';
+import type { DatabaseHandle, Logger } from '@coderexic/core';
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
 import { registerHealthRoutes } from './routes/health.js';
+import { registerWebhookRoutes } from './webhooks/route.js';
 
 export interface BuildServerOptions {
   logger: Logger;
   version?: string;
+  /** Enables the readiness check and, with `webhookSecret`, the GitHub webhook route. */
+  database?: DatabaseHandle;
+  webhookSecret?: string;
 }
 
-export function buildServer({ logger, version = '0.0.0' }: BuildServerOptions): FastifyInstance {
+export async function buildServer({
+  logger,
+  version = '0.0.0',
+  database,
+  webhookSecret,
+}: BuildServerOptions): Promise<FastifyInstance> {
   // Widen to Fastify's logger interface so routes see a plain FastifyInstance.
   const loggerInstance: FastifyBaseLogger = logger;
   const app = Fastify({
@@ -22,7 +31,10 @@ export function buildServer({ logger, version = '0.0.0' }: BuildServerOptions): 
     reply.header('x-request-id', request.id);
   });
 
-  registerHealthRoutes(app, version);
+  registerHealthRoutes(app, version, database && (() => database.ping()));
+  if (database && webhookSecret) {
+    await registerWebhookRoutes(app, { db: database.db, secret: webhookSecret });
+  }
 
   return app;
 }

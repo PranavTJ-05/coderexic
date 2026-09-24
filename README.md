@@ -7,8 +7,9 @@ consults a dependency graph of the repository (what the changed files
 import and what depends on them), lets an AI agent fetch the related code
 it needs, and posts validated findings as inline review comments.
 
-> **Status:** Phase 2 (database). Schema, migrations and data access are in
-> place; review features arrive in later phases. See [ROADMAP.md](ROADMAP.md).
+> **Status:** Phase 3 (GitHub App). Webhooks are verified and recorded, pull
+> requests create pending review jobs, and the GitHub client can read PRs
+> and publish reviews. Reviewing itself starts in Phase 4. See [ROADMAP.md](ROADMAP.md).
 
 ## Requirements
 
@@ -45,6 +46,7 @@ curl http://127.0.0.1:3000/health
 | `pnpm test:integration` | Postgres-backed tests (throwaway database) |
 | `pnpm db:generate`  | Generate a SQL migration from the schema      |
 | `pnpm db:migrate`   | Apply pending migrations                      |
+| `pnpm github:smoke` | Check GitHub App access against a real repo   |
 | `pnpm build`        | Compile core, then apps, to `dist/`           |
 | `pnpm format`       | Prettier write (`format:check` in CI)         |
 
@@ -65,3 +67,4 @@ packages/core   Shared code: env validation, logging, and later
 - [AI_AGENT_SPEC.md](AI_AGENT_SPEC.md)
 - [ROADMAP.md](ROADMAP.md)
 - [AGENTS.md](AGENTS.md): rules for coding agents and contributors
+- [docs/github-app.md](docs/github-app.md): registering the GitHub App and local webhooks
