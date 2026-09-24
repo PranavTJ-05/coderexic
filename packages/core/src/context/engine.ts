@@ -12,6 +12,7 @@ import { EMPTY_TS_ALIASES } from '../graph/tsconfig.js';
 import type { GitHubClient, RepoRef } from '../github/types.js';
 import { matchesGlob } from '../review/diff-filter.js';
 import type { ReviewContextCache } from './cache.js';
+import { fetchCachedContent } from './fetch-content.js';
 import { isTestFile, rankRelatedFiles, type ContextTier, type RelatedFile } from './rank.js';
 
 const DEFAULT_DEPTH = 1;
@@ -107,7 +108,14 @@ export async function buildReviewContext(
     changedPaths.map(async (path) => {
       const extractor = extractorFor(path);
       if (!extractor) return;
-      const content = await getHeadContent(client, ref, headSha, path, cache);
+      const { content } = await fetchCachedContent(
+        client,
+        ref,
+        path,
+        headSha,
+        MAX_HEAD_FILE_BYTES,
+        cache,
+      );
       if (content === null) return;
       const edges = extractor(content, { filePath: path, allFiles, tsAliases, goModule });
       for (const edge of edges) {
@@ -177,21 +185,6 @@ export async function buildReviewContext(
     degraded: false,
     note: notes.length > 0 ? notes.join(' ') : null,
   };
-}
-
-async function getHeadContent(
-  client: GitHubClient,
-  ref: RepoRef,
-  headSha: string,
-  path: string,
-  cache: ReviewContextCache | undefined,
-): Promise<string | null> {
-  if (cache?.hasFile(path, headSha)) return cache.getFile(path, headSha) ?? null;
-  const content = await client
-    .getFileContent(ref, path, headSha, MAX_HEAD_FILE_BYTES)
-    .catch(() => null);
-  cache?.setFile(path, headSha, content);
-  return content;
 }
 
 function clamp(value: number, min: number, max: number): number {
