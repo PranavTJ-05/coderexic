@@ -5,3 +5,4 @@ export * from './github/index.js';
 export * from './queue/index.js';
 export * from './llm/index.js';
 export * from './review/index.js';
+export * from './config/index.js';

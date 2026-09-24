@@ -77,3 +77,21 @@ Webhook signature verification uses `node:crypto`, not a library.
 6. **Can we remove it?** Yes. `packages/core/src/llm/gemini.ts` is the only
    file that knows about Gemini's request shape; the rest of the app uses
    the `ReviewModel` interface.
+
+## yaml (Phase 5)
+1. **What problem does it solve?** Parses `.coderexic.yml`/`.verix.yml`
+   (PRODUCT_SPEC §11). ARCHITECTURE §16 explicitly says "never use a
+   home-grown YAML parser" for repo config, since it's untrusted input.
+2. **Why not the existing stack?** No YAML parser exists in the project;
+   Node has no built-in one. `yaml` is the most widely used pure-JS
+   implementation, with no native dependencies to audit.
+3. **Operational cost:** none; parsing is synchronous and in-process.
+4. **Local dev:** nothing to configure.
+5. **Production:** config files are untrusted repository input, so the
+   loader calls `parse()` with an explicit `maxAliasCount` bound (the
+   library's own guard against a "billion laughs" style alias-expansion
+   file) and a byte cap on the file fetch itself
+   (`getFileContent(..., maxBytes)`), and treats any parse error as bad
+   config rather than a crash (PRODUCT_SPEC §18).
+6. **Can we remove it?** Yes. Only `packages/core/src/config/loader.ts`
+   imports it.

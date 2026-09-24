@@ -1,6 +1,7 @@
 import {
   createLogger,
   createReviewQueue,
+  ignorePatterns,
   ModelHttpError,
   reviewFindings,
   reviewJobs,
@@ -9,8 +10,10 @@ import {
   type GitHubApp,
   type GitHubClient,
   type ModelReviewOutput,
+  type PRFile,
   type PullRequest,
   type ReviewModel,
+  type ReviewModelInput,
 } from '@coderexic/core';
 import { eq } from 'drizzle-orm';
 import { describe, expect, it, vi } from 'vitest';
@@ -49,8 +52,25 @@ interface FakeClient extends GitHubClient {
   createIssueCommentCalls: { issueNumber: number; body: string }[];
 }
 
+const DEFAULT_PR_FILES: PRFile[] = [
+  {
+    filename: 'src/user.ts',
+    previousFilename: null,
+    status: 'modified',
+    additions: 1,
+    deletions: 0,
+    patch: PATCH,
+  },
+];
+
 function fakeClient(
-  overrides: { pullRequest?: Partial<PullRequest>; reviewBodies?: (string | null)[] } = {},
+  overrides: {
+    pullRequest?: Partial<PullRequest>;
+    reviewBodies?: (string | null)[];
+    prFiles?: PRFile[];
+    /** Repo-root files servable by getFileContent, e.g. `.coderexic.yml` or `AGENTS.md`. */
+    repoFiles?: Record<string, string>;
+  } = {},
 ): FakeClient {
   const createReviewCalls: CreateReviewInput[] = [];
   const createIssueCommentCalls: { issueNumber: number; body: string }[] = [];
@@ -58,18 +78,8 @@ function fakeClient(
     createReviewCalls,
     createIssueCommentCalls,
     getPullRequest: () => Promise.resolve(basePullRequest(overrides.pullRequest)),
-    getPullRequestFiles: () =>
-      Promise.resolve([
-        {
-          filename: 'src/user.ts',
-          previousFilename: null,
-          status: 'modified',
-          additions: 1,
-          deletions: 0,
-          patch: PATCH,
-        },
-      ]),
-    getFileContent: () => Promise.reject(new Error('not used in this test')),
+    getPullRequestFiles: () => Promise.resolve(overrides.prFiles ?? DEFAULT_PR_FILES),
+    getFileContent: (_ref, path) => Promise.resolve(overrides.repoFiles?.[path] ?? null),
     getRepositoryTree: () => Promise.reject(new Error('not used in this test')),
     listReviewBodies: () => Promise.resolve(overrides.reviewBodies ?? []),
     createReview: (_ref, input) => {
@@ -98,6 +108,23 @@ function fakeModel(output: ModelReviewOutput | (() => ModelReviewOutput)): Revie
 
 function throwingModel(error: Error): ReviewModel {
   return { generateReview: () => Promise.reject(error) };
+}
+
+/** Records every `generateReview` call so a test can inspect what the pipeline sent the model. */
+function recordingModel(output: ModelReviewOutput): {
+  model: ReviewModel;
+  calls: ReviewModelInput[];
+} {
+  const calls: ReviewModelInput[] = [];
+  return {
+    calls,
+    model: {
+      generateReview: (input) => {
+        calls.push(input);
+        return Promise.resolve(output);
+      },
+    },
+  };
 }
 
 const FINDING_OUTPUT: ModelReviewOutput = {
@@ -277,6 +304,135 @@ describe('worker: processReviewJob', () => {
     await processReviewJob(deps, job.id);
 
     expect(client.createReviewCalls).toHaveLength(0);
+    const [storedJob] = await db.select().from(reviewJobs).where(eq(reviewJobs.id, job.id));
+    expect(storedJob).toMatchObject({ status: 'SUCCEEDED' });
+  });
+
+  it('loads .coderexic.yml from the base sha and applies its min_severity and language hint', async () => {
+    const { job } = await makeReviewJob(db);
+    const client = fakeClient({
+      repoFiles: { '.coderexic.yml': 'min_severity: critical\nlanguage: rust\n' },
+    });
+    const { model, calls } = recordingModel({
+      summary: 'ok',
+      reviews: [
+        { ...FINDING_OUTPUT.reviews[0]!, severity: 'medium' },
+        { ...FINDING_OUTPUT.reviews[0]!, severity: 'critical', start_line: 3, end_line: 3 },
+      ],
+    });
+    const deps = {
+      db,
+      githubApp: fakeGithubApp(client),
+      model,
+      provider: 'test',
+      modelName: 'm',
+      logger,
+    };
+
+    await processReviewJob(deps, job.id);
+
+    expect(calls[0]?.languageHint).toBe('rust');
+    // min_severity: critical drops the medium finding; only the critical one is posted.
+    expect(client.createReviewCalls[0]?.comments).toHaveLength(1);
+  });
+
+  it('reads the rules file (first match in precedence order) from the base sha and passes it to the model', async () => {
+    const { job } = await makeReviewJob(db);
+    const client = fakeClient({
+      repoFiles: { 'AGENTS.md': 'Pay close attention to authorization checks.' },
+    });
+    const { model, calls } = recordingModel(FINDING_OUTPUT);
+    const deps = {
+      db,
+      githubApp: fakeGithubApp(client),
+      model,
+      provider: 'test',
+      modelName: 'm',
+      logger,
+    };
+
+    await processReviewJob(deps, job.id);
+
+    expect(calls[0]?.repositoryRules).toBe('Pay close attention to authorization checks.');
+  });
+
+  it('falls back to defaults and notes the problem in the posted summary when the config is invalid', async () => {
+    const { job } = await makeReviewJob(db);
+    const client = fakeClient({ repoFiles: { '.coderexic.yml': 'min_severity: [unterminated' } });
+    const deps = {
+      db,
+      githubApp: fakeGithubApp(client),
+      model: fakeModel(FINDING_OUTPUT),
+      provider: 'test',
+      modelName: 'm',
+      logger,
+    };
+
+    await processReviewJob(deps, job.id);
+
+    expect(client.createReviewCalls).toHaveLength(1);
+    expect(client.createReviewCalls[0]?.body).toContain('config warnings');
+    const [storedJob] = await db.select().from(reviewJobs).where(eq(reviewJobs.id, job.id));
+    expect(storedJob).toMatchObject({ status: 'SUCCEEDED' });
+  });
+
+  it('excludes an ignored path from what the model sees, and drops any finding still reported on it', async () => {
+    const { job } = await makeReviewJob(db);
+    const client = fakeClient({
+      repoFiles: { '.coderexic.yml': 'ignore:\n  - "dist/**"\n' },
+      prFiles: [
+        ...DEFAULT_PR_FILES,
+        {
+          filename: 'dist/bundle.js',
+          previousFilename: null,
+          status: 'modified',
+          additions: 1,
+          deletions: 0,
+          patch: '@@ -1 +1 @@\n-a\n+b',
+        },
+      ],
+    });
+    const { model, calls } = recordingModel({
+      summary: 'ok',
+      reviews: [
+        FINDING_OUTPUT.reviews[0]!,
+        { ...FINDING_OUTPUT.reviews[0]!, filename: 'dist/bundle.js' },
+      ],
+    });
+    const deps = {
+      db,
+      githubApp: fakeGithubApp(client),
+      model,
+      provider: 'test',
+      modelName: 'm',
+      logger,
+    };
+
+    await processReviewJob(deps, job.id);
+
+    expect(calls[0]?.files.map((f) => f.filename)).toEqual(['src/user.ts']);
+    expect(client.createReviewCalls[0]?.comments).toHaveLength(1);
+    expect(client.createReviewCalls[0]?.body).not.toContain('dist/bundle.js');
+  });
+
+  it('combines the repo_id-scoped ignore_patterns rows with the yml ignore list', async () => {
+    const { repository, job } = await makeReviewJob(db);
+    await db.insert(ignorePatterns).values({ repositoryId: repository.id, pattern: 'src/**' });
+    const client = fakeClient();
+    const { model, calls } = recordingModel(FINDING_OUTPUT);
+    const deps = {
+      db,
+      githubApp: fakeGithubApp(client),
+      model,
+      provider: 'test',
+      modelName: 'm',
+      logger,
+    };
+
+    await processReviewJob(deps, job.id);
+
+    // The only PR file (src/user.ts) is excluded by the stored pattern, so the model never runs.
+    expect(calls).toHaveLength(0);
     const [storedJob] = await db.select().from(reviewJobs).where(eq(reviewJobs.id, job.id));
     expect(storedJob).toMatchObject({ status: 'SUCCEEDED' });
   });

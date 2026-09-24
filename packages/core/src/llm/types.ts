@@ -43,6 +43,8 @@ export interface ReviewModelInput {
   files: readonly ReviewFileInput[];
   /** Untrusted repository policy hints (Phase 5); never overrides system instructions. */
   repositoryRules?: string | null;
+  /** Repo config's `language` hint (Phase 5), e.g. "typescript". */
+  languageHint?: string | null;
 }
 
 export interface GenerateReviewOptions {

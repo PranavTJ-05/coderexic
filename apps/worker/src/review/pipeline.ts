@@ -7,10 +7,14 @@ import {
   dedupeFindings,
   failReviewJob,
   filterBySeverity,
+  filterIgnoredPaths,
   findInstallationById,
   findRepositoryById,
   getRepositorySettings,
   hasReviewMarker,
+  listIgnorePatterns,
+  loadRepositoryConfig,
+  loadRepositoryRules,
   ModelError,
   ModelInvalidOutputError,
   ModelTimeoutError,
@@ -119,12 +123,29 @@ export async function processReviewJob(
       return;
     }
 
-    const settings = await getRepositorySettings(db, repository.id);
-    const minimumSeverity = settings?.minimumSeverity ?? 'low';
+    // Loaded from the PR's base sha, never its head: reading from head would let a PR
+    // edit its own review rules or ignore list to silence findings about itself.
+    const [settings, dbIgnorePatterns, config, rulesFile] = await Promise.all([
+      getRepositorySettings(db, repository.id),
+      listIgnorePatterns(db, repository.id),
+      loadRepositoryConfig(client, ref, pr.baseSha),
+      loadRepositoryRules(client, ref, pr.baseSha),
+    ]);
+    // The yml is a per-job override on top of the DB layers (app defaults, then
+    // repository_settings/ignore_patterns); it never writes back to the DB
+    // (ARCHITECTURE.md §16's layering, and Phase 13's settings UI owns those rows).
+    const minimumSeverity = config.minSeverity ?? settings?.minimumSeverity ?? 'low';
     const maxReviewSeconds = settings?.maxReviewSeconds ?? 60;
+    const ignoreGlobs = [...dbIgnorePatterns, ...config.ignore];
+    if (config.warnings.length > 0) {
+      log.warn(
+        { warnings: config.warnings },
+        'repository config has issues; falling back per field',
+      );
+    }
 
     const files = await client.getPullRequestFiles(ref, pr.number);
-    const selection = selectReviewableFiles(files, { budget });
+    const selection = selectReviewableFiles(files, { budget, ignoreGlobs });
     log.info(
       {
         changedFiles: files.length,
@@ -169,24 +190,26 @@ export async function processReviewJob(
             status,
             patch,
           })),
+          repositoryRules: rulesFile?.content ?? null,
+          languageHint: config.language ?? settings?.languageHint ?? null,
         },
         { signal: controller.signal },
       );
 
-      const deduped = dedupeFindings(filterBySeverity(output.reviews, minimumSeverity));
+      const ignoreFiltered = filterIgnoredPaths(output.reviews, ignoreGlobs);
+      const deduped = dedupeFindings(filterBySeverity(ignoreFiltered, minimumSeverity));
       const filesByPath = new Map(selection.files.map((file) => [file.filename, file.patch]));
       const processed = placeFindings(deduped, filesByPath);
       const built = buildReview(processed);
 
-      const publishError = await publishReview(
-        client,
-        ref,
-        pr,
-        reviewJobId,
-        output.summary,
-        built,
-        log,
-      );
+      // Bad repo config never vanishes silently (PRODUCT_SPEC.md §18): surface it in
+      // the posted review, not just the logs.
+      const summary =
+        config.warnings.length > 0
+          ? `${output.summary}\n\n⚠️ Repository config warnings: ${config.warnings.join('; ')}`
+          : output.summary;
+
+      const publishError = await publishReview(client, ref, pr, reviewJobId, summary, built, log);
 
       await completeReview(db, {
         reviewJobId,
@@ -195,7 +218,7 @@ export async function processReviewJob(
           provider,
           model: modelName,
           status: publishError ? 'FAILED' : 'SUCCEEDED',
-          summary: output.summary,
+          summary,
           filesConsidered: files.length,
           filesFetched: selection.files.length,
           agentTurns: 1,
