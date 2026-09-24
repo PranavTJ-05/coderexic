@@ -16,6 +16,20 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: coderexic
+          POSTGRES_PASSWORD: coderexic
+          POSTGRES_DB: coderexic
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U coderexic -d coderexic"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://coderexic:coderexic@localhost:5432/coderexic
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -28,6 +42,9 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
+      - run: pnpm test:integration
+      - name: Migrations match the schema
+        run: pnpm db:generate && test -z "$(git status --porcelain packages/core/drizzle)"
       - run: pnpm build
 
   docker:

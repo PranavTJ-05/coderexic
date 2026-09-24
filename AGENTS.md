@@ -56,7 +56,14 @@ compiles core first, then apps against core's `dist/`.
   `.js` (`import { x } from './x.js'`).
 - Type-only imports use `import type`.
 - Tests live next to code as `*.test.ts`. Tests needing Postgres or Redis
-  go under `tests/integration/` (from Phase 2).
+  go under `tests/integration/` and run with `pnpm test:integration`, which
+  creates and drops a throwaway database on `TEST_DATABASE_URL` (or
+  `DATABASE_URL`).
+- Schema changes: edit `packages/core/src/db/schema.ts`, run
+  `pnpm db:generate`, commit the generated SQL. Never hand-edit applied
+  migrations. CI fails if the schema and migrations drift.
+- Data access goes through `packages/core/src/db/store/`. Multi-step writes
+  use one transaction; never hold one open across GitHub or LLM calls.
 - Prefer factories that take dependencies (`buildServer({ logger })`) over
   module-level singletons, so everything is testable without I/O.
 - Environment is validated once at startup with `parseEnv`; add new
@@ -70,6 +77,8 @@ compiles core first, then apps against core's `dist/`.
 pnpm install
 pnpm dev:api | pnpm dev:worker
 pnpm lint | pnpm typecheck | pnpm test | pnpm build
+pnpm test:integration                 # needs Postgres
+pnpm db:generate | pnpm db:migrate
 pnpm format
 docker compose up -d postgres redis   # infra for local dev
 docker compose up --build             # full stack
