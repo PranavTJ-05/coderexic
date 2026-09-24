@@ -1,208 +1,70 @@
-# Architecture --- Context-Aware Agentic GitHub Code Review Platform
+# Architecture: Coderexic
 
-## 1. Architectural Principles
+Section numbers are kept stable. `AGENTS.md` cites §22.
 
-1.  GitHub is the source of truth for repository state.
-2.  The database stores application state and an indexed dependency
-    graph, not an authoritative copy of source code.
-3.  AI is an analysis component, not the system of record.
-4.  Agent tools are explicit and allowlisted.
-5.  External providers are behind interfaces.
-6.  Webhooks enqueue work; workers perform long-running analysis.
-7.  Every external input is untrusted.
-8.  Every expensive operation has a budget.
-9.  Every major capability must be independently testable.
-10. Start as a modular monolith and split services only when scale
-    requires it.
+## 1. Principles
+1. GitHub is the source of truth for repo state.
+2. The DB holds app state and the indexed graph, not an authoritative copy of
+   the source.
+3. AI is an analysis component, not the system of record.
+4. Agent tools are explicit and allowlisted.
+5. External providers sit behind interfaces.
+6. Webhooks enqueue work; workers do the long-running analysis.
+7. Every external input is untrusted.
+8. Every expensive operation has a budget.
+9. Every major capability can be tested on its own.
+10. Start as a modular monolith. Split only when scale demands it.
 
-------------------------------------------------------------------------
-
-# 2. High-Level Architecture
-
-``` text
-                         GitHub
-                           |
-                    Webhook / API
-                           |
-                           v
-                +---------------------+
-                |   API / Webhook     |
-                |       Server        |
-                +----------+----------+
-                           |
-                    create job
-                           |
-                           v
-                +---------------------+
-                |       Queue         |
-                +----------+----------+
-                           |
-                           v
-                +---------------------+
-                |   Review Worker     |
-                +----------+----------+
-                           |
-             +-------------+-------------+
-             |             |             |
-             v             v             v
-        GitHub API    Repository DB   Config Loader
-             |             |             |
-             +-------------+-------------+
-                           |
-                           v
-                 +-------------------+
-                 | Context / Graph   |
-                 |     Engine        |
-                 +---------+---------+
-                           |
-                           v
-                  +----------------+
-                  |  Review Agent  |
-                  +-------+--------+
-                          |
-               +----------+----------+
-               |          |          |
-               v          v          v
-           imports   dependents   file content
-               |          |          |
-               +----------+----------+
-                          |
-                          v
-                     LLM Provider
-                          |
-                          v
-                  Structured Review
-                          |
-                          v
-                  Validation Layer
-                          |
-                          v
-                     GitHub API
-                          |
-                          v
-                    PR Comments
+## 2. High-level flow
+```text
+GitHub --webhook/API--> API/Webhook server --create job--> Queue --> Review Worker
+Worker uses: GitHub API, Repository DB, Config Loader
+  -> Context/Graph Engine -> Review Agent (tools: imports, dependents, file content)
+  -> LLM Provider -> Structured Review -> Validation Layer -> GitHub API -> PR comments
 ```
 
-------------------------------------------------------------------------
+## 3. Repository layout
+The spec's full monorepo sketch:
+- `apps/`: `api`, `worker`, `web`
+- `packages/`: core, github, agent, llm, indexer, config, database, security,
+  observability, shared
+- `tests/`: fixtures, integration, evaluation
+- `infra/`: docker, deployment
+- `docs/`
+- root files: `.env.example`, `docker-compose.yml`, and the spec docs
 
-# 3. Recommended Repository Architecture
+A smaller first build may be one TypeScript app with modules. Never put a
+network boundary between packages.
 
-Use a monorepo initially:
+**Decision:** Coderexic uses the lean variant. It has `apps/api` and
+`apps/worker` (with `apps/web` in Phase 13), and one `packages/core` split
+into folders.
 
-``` text
-reviewgraph/
-├── apps/
-│   ├── api/
-│   │   └── src/
-│   ├── worker/
-│   │   └── src/
-│   └── web/
-│       └── src/
-│
-├── packages/
-│   ├── core/
-│   ├── github/
-│   ├── agent/
-│   ├── llm/
-│   ├── indexer/
-│   ├── config/
-│   ├── database/
-│   ├── security/
-│   ├── observability/
-│   └── shared/
-│
-├── tests/
-│   ├── fixtures/
-│   ├── integration/
-│   └── evaluation/
-│
-├── infra/
-│   ├── docker/
-│   └── deployment/
-│
-├── docs/
-├── .env.example
-├── docker-compose.yml
-├── AGENTS.md
-├── PRODUCT_SPEC.md
-├── ARCHITECTURE.md
-├── DATA_MODEL.md
-├── AI_AGENT_SPEC.md
-└── ROADMAP.md
-```
+## 4. Runtime components
+- **API:**
+  - health checks
+  - GitHub OAuth (if there's a hosted UI)
+  - webhooks and install callbacks
+  - user settings
+  - review-status APIs
+  - It never runs agent reviews itself.
+- **Worker:** consumes review jobs. It fetches the PR, loads config, makes
+  sure the graph is current, runs the agent, validates findings, publishes the
+  GitHub review and persists the result.
+- **Queue:** choose one and never build a custom queue. The options were
+  Redis + BullMQ, a Postgres-backed queue (tiny deploys) or SQS (AWS).
+  **Decision: Redis + BullMQ.**
+- **PostgreSQL** stores:
+  - users, installations, repos and repo settings
+  - dependency edges
+  - review jobs, reviews and findings
+  - provider config metadata and encrypted credentials
+  - audit events
 
-A smaller first implementation may use one TypeScript application with
-modules. Do not introduce a network boundary between every package.
-
-------------------------------------------------------------------------
-
-# 4. Runtime Components
-
-## API server
-
-Responsibilities:
-
--   health checks;
--   GitHub OAuth if hosted UI exists;
--   GitHub webhook handling;
--   installation callbacks;
--   user settings;
--   review status APIs.
-
-It must NOT execute long-running agent reviews directly.
-
-------------------------------------------------------------------------
-
-## Worker
-
-Responsibilities:
-
--   consume review jobs;
--   fetch PR data;
--   load configuration;
--   ensure dependency graph is current;
--   execute agent;
--   validate findings;
--   publish GitHub review;
--   persist result.
-
-------------------------------------------------------------------------
-
-## Queue
-
-Recommended initial options:
-
--   Redis + BullMQ;
--   PostgreSQL-backed job queue for a very small deployment;
--   SQS for AWS production.
-
-Choose one. Do not build a custom queue.
-
-------------------------------------------------------------------------
-
-## PostgreSQL
-
-Stores:
-
--   users;
--   GitHub installations;
--   repositories;
--   repository settings;
--   dependency edges;
--   review jobs;
--   reviews;
--   findings;
--   provider configuration metadata;
--   encrypted credentials;
--   audit events.
-
-------------------------------------------------------------------------
-
-# 5. GitHub Integration
-
-Create a dedicated `GitHubClient` abstraction.
-
-``` ts
+## 5. GitHub integration
+Wrap GitHub in a `GitHubClient` abstraction. Nothing else in the app depends
+on Octokit request details.
+```ts
 interface GitHubClient {
   getPullRequest(...): Promise<PullRequest>;
   getPullRequestFiles(...): Promise<PRFile[]>;
@@ -213,538 +75,184 @@ interface GitHubClient {
 }
 ```
 
-The rest of the application must not depend on Octokit request details.
+## 6. Webhook flow
+`POST /webhooks/github`:
+1. Read the raw body.
+2. Verify `X-Hub-Signature-256`.
+3. Parse the event and check its type and action.
+4. Resolve the installation.
+5. Build the idempotency key: `installation_id + repository_id + event_id`.
+6. Persist the job.
+7. Return 2xx fast.
 
-------------------------------------------------------------------------
+Execution is also deduplicated on `repository + pull_request + head_sha`.
 
-# 6. Webhook Flow
+## 7. Review pipeline
+1. Take a `ReviewJob` and load the PR.
+2. Load the repo config and the changed files.
+3. Filter out ignored paths.
+4. Resolve the graph.
+5. Build the `AgentContext` and run the agent.
+6. Validate the `ReviewFinding[]`.
+7. Apply the severity filter.
+8. Map findings to GitHub lines.
+9. Create the GitHub review.
+10. Persist the results.
 
-``` text
-POST /webhooks/github
-        |
-        v
-Read raw request body
-        |
-        v
-Verify X-Hub-Signature-256
-        |
-        v
-Parse event
-        |
-        v
-Check event type/action
-        |
-        v
-Resolve installation
-        |
-        v
-Create idempotency key
-        |
-        v
-Persist job
-        |
-        v
-Return 2xx quickly
+## 8. Dependency graph
+**Forward:** `A -> [B, C]`. **Reverse:** `B -> [A]`, `C -> [A]`.
+
+Each edge row is `(repository_id, source_path, target_path, commit_sha)`.
+Indexes on `(repository_id, source_path)` and `(repository_id, target_path)`
+make `get_imports(A)` and `get_dependents(B)` cheap.
+
+## 9. Indexing
+**Initial (on install):**
+1. Read the tree at the default branch.
+2. Filter to supported files and fetch their contents.
+3. Parse imports and resolve the local ones.
+4. Store the edges.
+5. Mark the repo indexed at that SHA.
+
+**Incremental (on push):**
+1. Diff the old SHA against the new one.
+2. For each changed source file, drop its outgoing edges and re-parse it.
+3. Update the affected reverse relations.
+4. Update the indexed SHA.
+
+If incremental indexing gets unreliable, do a full rebuild. Correctness
+beats optimization.
+
+## 10. Import resolution
+- **JS/TS:**
+  - relative imports
+  - `.js` resolving to `.ts`/`.tsx`
+  - extensionless imports
+  - `index.ts`
+  - aliases such as `@/` and `~/`
+  - packages excluded from the graph
+- **Python:** relative imports, module path mapping, and `__init__` packages.
+- **Go:** local module packages. Standard and external packages are ignored
+  unless they're in the repo.
+- **Rust:** `crate::`, `mod`, and local module relations.
+- **Java:** package and import relations.
+- **Ruby:** `require` and `require_relative`.
+
+Each import is classified as a **resolved local dependency**, an **external
+dependency**, or **unresolved**.
+
+## 11. Context selection
+Never give the agent the whole repo. Start with the changed files, their
+direct imports and their direct dependents, then let the agent explore.
+
+Future ranking score:
+```text
+score = direct_dependency_weight + direct_dependent_weight
+      + changed_file_proximity + symbol_match + test_relationship + path_relevance
 ```
 
-Idempotency key:
-
-``` text
-installation_id + repository_id + event_id
+## 12. LLM adapters
+```ts
+interface AgentModel { chat(messages: AgentMessage[], tools: ToolDefinition[]): Promise<AgentResponse>; }
 ```
-
-For review execution, also prevent duplicate processing of:
-
-``` text
-repository + pull_request + head_sha
-```
-
-------------------------------------------------------------------------
-
-# 7. Review Pipeline
-
-``` text
-ReviewJob
-   |
-   v
-Load PR
-   |
-   v
-Load repository config
-   |
-   v
-Load changed files
-   |
-   v
-Filter ignored paths
-   |
-   v
-Resolve repository graph
-   |
-   v
-Create AgentContext
-   |
-   v
-Run Agent
-   |
-   v
-Validate ReviewFinding[]
-   |
-   v
-Apply severity filter
-   |
-   v
-Map findings to GitHub lines
-   |
-   v
-Create GitHub review
-   |
-   v
-Persist results
-```
-
-------------------------------------------------------------------------
-
-# 8. Dependency Graph
-
-The graph contains:
-
-``` text
-forward:
-A -> [B, C]
-
-reverse:
-B -> [A]
-C -> [A]
-```
-
-The database should store edges as:
-
-``` text
-repository_id
-source_path
-target_path
-commit_sha
-```
-
-Indexes:
-
-``` text
-(repository_id, source_path)
-(repository_id, target_path)
-```
-
-This permits:
-
-``` text
-get_imports(A)
-get_dependents(B)
-```
-
-------------------------------------------------------------------------
-
-# 9. Indexing Strategy
-
-## Initial indexing
-
-When a repository is installed:
-
-1.  Fetch repository tree at default branch.
-2.  Filter supported source files.
-3.  Fetch source contents.
-4.  Parse imports.
-5.  Resolve local imports.
-6.  Store edges.
-7.  Mark repository indexed at commit SHA.
-
-## Incremental indexing
-
-On push:
-
-1.  Compare old SHA and new SHA.
-2.  Identify changed source files.
-3.  Remove stale edges originating from changed files.
-4.  Re-parse changed files.
-5.  Update affected reverse relationships.
-6.  Update indexed SHA.
-
-If incremental logic becomes unreliable, fall back to a complete
-rebuild.
-
-Correctness is more important than optimization.
-
-------------------------------------------------------------------------
-
-# 10. Import Resolution
-
-The resolver should support:
-
-### JavaScript / TypeScript
-
--   relative imports;
--   `.js` -\> `.ts`/`.tsx` convention;
--   extensionless imports;
--   `index.ts`;
--   common aliases such as `@/` and `~/`;
--   package imports excluded from repository graph.
-
-### Python
-
--   relative imports;
--   module path mapping;
--   package `__init__` resolution.
-
-### Go
-
--   local module packages;
--   standard/external packages ignored unless repository-local.
-
-### Rust
-
--   `crate::`;
--   `mod`;
--   local module relationships.
-
-### Java
-
--   package/import relationships.
-
-### Ruby
-
--   `require`;
--   `require_relative`.
-
-The graph should distinguish:
-
-``` text
-resolved local dependency
-external dependency
-unresolved import
-```
-
-------------------------------------------------------------------------
-
-# 11. Context Selection
-
-The agent should not receive the entire repository.
-
-Start with:
-
-``` text
-changed files
-+
-direct imports
-+
-direct dependents
-```
-
-Then let the agent explore further.
-
-Potential future ranking:
-
-``` text
-score =
-  direct_dependency_weight
-  + direct_dependent_weight
-  + changed_file_proximity
-  + symbol_match
-  + test_relationship
-  + path relevance
-```
-
-------------------------------------------------------------------------
-
-# 12. LLM Adapter Architecture
-
-``` ts
-interface AgentModel {
-  chat(
-    messages: AgentMessage[],
-    tools: ToolDefinition[]
-  ): Promise<AgentResponse>;
-}
-```
-
-Implement:
-
-``` text
-OpenAIAdapter
-AnthropicAdapter
-GeminiAdapter
-OllamaAdapter
-```
-
-Provider-specific message/tool translation stays inside adapters.
-
-Agent logic never imports provider SDKs.
-
-------------------------------------------------------------------------
-
-# 13. Security Boundary
-
-The highest-risk boundary is:
-
-``` text
-untrusted repository
-        +
-untrusted repository instructions
-        +
-LLM
-```
-
-Never allow repository files to redefine:
-
--   system safety rules;
--   tool permissions;
--   filesystem boundaries;
--   network access;
--   secrets;
--   agent limits.
-
-Repository instructions are treated as policy hints only.
-
-------------------------------------------------------------------------
-
-# 14. Agent Tool Security
-
-Every tool must validate:
-
-### get_file_content
-
--   path is repository-relative;
--   no `..`;
--   no absolute paths;
--   file belongs to the target repository;
--   content is fetched from the intended commit/ref.
-
-### get_imports / get_dependents
-
--   repository ID is fixed by server-side context;
--   path is validated;
--   no user/model supplied repository identifier.
-
-### submit_review
-
--   schema validation;
--   file must be changed file;
--   line must be in a reviewable diff;
--   severity must be allowed;
--   suggested code must be bounded in size.
-
-------------------------------------------------------------------------
-
-# 15. GitHub Comment Architecture
-
-The agent produces internal findings.
-
-A separate publisher translates:
-
-``` text
-ReviewFinding
-        |
-        v
-GitHubReviewComment
-```
-
-This separation prevents the LLM from directly controlling GitHub API
-payloads.
-
-------------------------------------------------------------------------
-
-# 16. Configuration Architecture
-
-Load:
-
-``` text
-application defaults
-        |
-        v
-user configuration
-        |
-        v
-repository .verix.yml
-        |
-        v
-repository rules file
-```
-
-Validate configuration with a schema.
-
-Do not use a home-grown YAML parser in the production architecture.
-
-------------------------------------------------------------------------
-
-# 17. Failure Handling
-
-## GitHub failure
-
-Retry transient errors with exponential backoff.
-
-Do not retry permanent 4xx errors indefinitely.
-
-## Model failure
-
-Retry limited times.
-
-Then mark review:
-
-``` text
-FAILED_MODEL
-```
-
-## Agent timeout
-
-Mark:
-
-``` text
-TIMED_OUT
-```
-
-Do not publish partial findings unless explicitly supported.
-
-## Index failure
-
-Review may fall back to diff-only mode with a visible status.
-
-------------------------------------------------------------------------
-
-# 18. State Machine
-
-Review job:
-
-``` text
-PENDING
-  |
-  v
-RUNNING
-  |
-  +----> SUCCEEDED
-  |
-  +----> FAILED
-  |
-  +----> TIMED_OUT
-  |
-  +----> CANCELLED
-```
-
-Index job:
-
-``` text
-PENDING
-  |
-  v
-INDEXING
-  |
-  +----> READY
-  |
-  +----> FAILED
-```
-
-------------------------------------------------------------------------
-
-# 19. Deployment
-
-Initial production:
-
-``` text
-                 Internet
-                    |
-                 Nginx/LB
-                    |
-              API container
-                    |
-             PostgreSQL
-                    |
-              Redis/Queue
-                    |
-              Worker container
-```
-
-Optional:
-
-``` text
-Object storage
-```
-
-for large artifacts/logs later.
-
-Docker Compose is sufficient for early deployment.
-
-Kubernetes is not required initially.
-
-------------------------------------------------------------------------
-
-# 20. Scaling Path
-
-Stage 1:
-
-``` text
-1 API
-1 Worker
-1 Postgres
-1 Redis
-```
-
-Stage 2:
-
-``` text
-multiple workers
-```
-
-Stage 3:
-
-``` text
-separate indexing workers
-review workers
-webhook API
-```
-
-Stage 4:
-
-``` text
-multi-region / enterprise infrastructure
-```
-
-Do not start with Stage 4.
-
-------------------------------------------------------------------------
-
-# 21. Recommended Initial Technology
-
-Because the target product is similar to the existing TypeScript
-implementation, use:
-
--   TypeScript;
--   Node.js;
--   Fastify or Express;
--   Octokit;
--   PostgreSQL;
--   Redis + BullMQ;
--   pnpm;
--   Zod;
--   Vitest;
--   Docker;
--   OpenTelemetry-compatible logging/metrics.
-
-Frontend:
-
--   Next.js;
--   Tailwind CSS;
--   shadcn/ui.
-
-Use a modular monolith before splitting services.
-
-------------------------------------------------------------------------
-
-# 22. Architecture Decision Rules
-
-When the agent proposes a new technology, it must answer:
-
-1.  What problem does it solve?
-2.  Why can't the existing stack solve it?
-3.  What operational cost does it add?
-4.  How does it affect local development?
-5.  How does it affect production?
-6.  Can we remove it later?
-
-No dependency should be added merely because it is fashionable.
+The adapters are OpenAI, Anthropic, Gemini and Ollama.
+
+Provider-specific message and tool translation stays inside the adapters. The
+agent logic never imports a provider SDK.
+
+## 13. Security boundary
+The riskiest boundary is **untrusted repo + untrusted repo instructions +
+LLM**.
+
+Repo files may never redefine:
+- safety rules
+- tool permissions
+- filesystem boundaries
+- network access
+- secrets
+- agent limits
+
+Repo instructions are policy hints only.
+
+## 14. Tool security
+- **`get_file_content`:**
+  - The path must be repo-relative, with no `..` and no absolute paths.
+  - The file must be in the target repo.
+  - It is fetched at the intended commit or ref.
+- **`get_imports` and `get_dependents`:** the repo ID is fixed by
+  server-side context, and the path is validated. A user or the model never
+  supplies a repo identifier.
+- **`submit_review`:**
+  - Schema-validated.
+  - The file must be one of the changed files.
+  - The line must be in a reviewable part of the diff.
+  - The severity must be allowed.
+  - Suggested code has a size limit.
+
+## 15. Comment publishing
+The agent emits internal `ReviewFinding`s. A separate publisher maps them to
+`GitHubReviewComment`s, so the LLM never controls GitHub API payloads.
+
+## 16. Configuration
+Layers, each overriding the one before:
+1. App defaults.
+2. User config.
+3. Repo `.verix.yml` (or `.coderexic.yml`).
+4. The repo rules file.
+
+Validate against a schema. Never use a home-grown YAML parser.
+
+## 17. Failure handling
+- **GitHub:**
+  - Retry transient errors with exponential backoff.
+  - Never retry permanent 4xx errors indefinitely.
+- **Model:**
+  - Retry a limited number of times.
+  - Then mark the review `FAILED_MODEL`.
+- **Agent timeout:**
+  - Mark the review `TIMED_OUT`.
+  - Don't publish partial findings unless that's explicitly supported.
+- **Index failure:**
+  - The review may fall back to diff-only.
+  - That fallback status must be visible.
+
+## 18. State machines
+- **Review job:** `PENDING -> RUNNING`, then `SUCCEEDED`, `FAILED`, `TIMED_OUT`
+  or `CANCELLED`.
+- **Index job:** `PENDING -> INDEXING`, then `READY` or `FAILED`.
+
+## 19. Deployment
+The initial chain is Internet -> Nginx/LB -> API container -> Postgres ->
+Redis/Queue -> Worker container. Object storage is optional, for large
+artifacts and logs later. Docker Compose is enough early on; Kubernetes
+isn't needed.
+
+## 20. Scaling path
+1. One each of API, worker, Postgres and Redis.
+2. Multiple workers.
+3. Separate indexing workers, review workers and webhook API.
+4. Multi-region or enterprise.
+
+Don't start at stage 4.
+
+## 21. Initial technology
+- **Backend:** TypeScript and Node.js, Fastify (or Express), Octokit,
+  PostgreSQL, Redis + BullMQ, pnpm, Zod, Vitest, Docker, and
+  OpenTelemetry-compatible logs and metrics.
+- **Frontend:** Next.js, Tailwind and shadcn/ui.
+
+Use a modular monolith first.
+
+**Decisions:** Fastify, Drizzle ORM with drizzle-kit, pino logging, Node 24,
+and TypeScript ~6.0.
+
+## 22. Rules for adding a dependency
+Before adding any new technology, answer:
+1. What problem does it solve?
+2. Why can't the existing stack solve it?
+3. What operational cost does it add?
+4. What's the impact on local dev?
+5. What's the impact on production?
+6. Can we remove it later?
+
+Never add something just because it's fashionable.
