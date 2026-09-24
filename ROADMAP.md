@@ -69,7 +69,7 @@ agent → findings → GitHub comments, without ambiguity.
 
 ## Phase 3: GitHub App
 **Goal:** receive events from GitHub and act on them securely.
-- [ ] GitHub App configuration (code and docs done; live check with a registered App pending)
+- [x] GitHub App configuration (verified live on a throwaway repo, 2026-09-24)
 - [x] App authentication
 - [x] Installation authentication
 - [x] Webhook signature validation
