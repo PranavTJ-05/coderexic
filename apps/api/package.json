@@ -11,7 +11,8 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "node dist/index.js",
-    "db:migrate": "tsx --conditions=source --env-file-if-exists=../../.env src/migrate.ts"
+    "db:migrate": "tsx --conditions=source --env-file-if-exists=../../.env src/migrate.ts",
+    "github:smoke": "tsx --conditions=source --env-file-if-exists=../../.env src/scripts/github-smoke.ts"
   },
   "dependencies": {
     "@coderexic/core": "workspace:*",

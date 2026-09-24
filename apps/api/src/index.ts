@@ -1,10 +1,16 @@
-import { createLogger } from '@coderexic/core';
+import { createDatabase, createLogger } from '@coderexic/core';
 import { loadApiEnv } from './env.js';
 import { buildServer } from './server.js';
 
 const env = loadApiEnv();
 const logger = createLogger({ name: 'api', level: env.LOG_LEVEL });
-const app = buildServer({ logger, version: process.env.npm_package_version ?? '0.0.0' });
+const database = createDatabase({ url: env.DATABASE_URL });
+const app = await buildServer({
+  logger,
+  version: process.env.npm_package_version ?? '0.0.0',
+  database,
+  webhookSecret: env.GITHUB_WEBHOOK_SECRET,
+});
 
 let shuttingDown = false;
 async function shutdown(signal: NodeJS.Signals): Promise<void> {
@@ -13,6 +19,7 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
   logger.info({ signal }, 'shutting down');
   try {
     await app.close();
+    await database.close();
     process.exit(0);
   } catch (err) {
     logger.error({ err }, 'error during shutdown');

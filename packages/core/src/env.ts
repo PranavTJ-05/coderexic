@@ -26,12 +26,15 @@ export class EnvValidationError extends Error {
 /**
  * Validates environment variables against a schema. Error messages name the
  * variable and the problem but never include the offending value, since
- * values may be secrets.
+ * values may be secrets. An empty value (`KEY=` in .env) counts as unset.
  */
 export function parseEnv<T extends z.ZodType>(
   schema: T,
-  source: Record<string, string | undefined> = process.env,
+  rawSource: Record<string, string | undefined> = process.env,
 ): z.infer<T> {
+  const source = Object.fromEntries(
+    Object.entries(rawSource).filter(([, value]) => value !== ''),
+  ) as Record<string, string | undefined>;
   const result = schema.safeParse(source);
   if (result.success) {
     return result.data;

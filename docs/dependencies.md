@@ -24,3 +24,19 @@ questions in ARCHITECTURE.md §22.
 5. **Production:** a per-process pool, sized by `maxConnections`.
 6. **Can we remove it?** Yes. Drizzle also supports `pg`, and the driver
    appears only in `db/client.ts` and `db/migrate.ts`.
+
+## octokit (Phase 3)
+1. **What problem does it solve?** GitHub App authentication (a JWT, then
+   installation tokens with caching and refresh), typed REST calls,
+   pagination, retries, and rate-limit throttling.
+2. **Why not the existing stack?** Doing this by hand means reimplementing
+   JWT signing, token caching and rate-limit handling, all of it
+   security-sensitive. ARCHITECTURE §21 names Octokit.
+3. **Operational cost:** none. It's a library, with no service to run.
+4. **Local dev:** nothing extra. Tests inject a fake `fetch`.
+5. **Production:** it runs in-process. Throttling protects us from secondary
+   rate limits.
+6. **Can we remove it?** Yes. Only `packages/core/src/github/client.ts` uses
+   it, behind the `GitHubClient` interface (ARCHITECTURE §5).
+
+Webhook signature verification uses `node:crypto`, not a library.

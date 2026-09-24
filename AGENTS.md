@@ -70,6 +70,10 @@ compiles core first, then apps against core's `dist/`.
   variables to the schema of the phase that needs them, plus
   `.env.example`.
 - No `console.*`; use the logger.
+- GitHub access goes through the `GitHubClient` interface
+  (`packages/core/src/github/`); nothing else imports Octokit. Webhook
+  handlers only write to the database: no GitHub or LLM calls, so GitHub
+  gets its response fast.
 
 ## Commands
 

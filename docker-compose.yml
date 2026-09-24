@@ -59,6 +59,8 @@ services:
     environment:
       <<: *app-env
       PORT: 3000
+      # Required: the API refuses to start without it.
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
     ports:
       - '127.0.0.1:${API_PORT:-3000}:3000'
     depends_on:
