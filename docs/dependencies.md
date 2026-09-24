@@ -40,3 +40,40 @@ questions in ARCHITECTURE.md §22.
    it, behind the `GitHubClient` interface (ARCHITECTURE §5).
 
 Webhook signature verification uses `node:crypto`, not a library.
+
+## bullmq + ioredis (Phase 4)
+1. **What problem does it solve?** The job queue between the API (produces
+   review jobs) and the worker (consumes them), with retries, backoff and
+   per-job idempotency. ARCHITECTURE §4 named Redis + BullMQ as the
+   decision over a Postgres-backed queue or SQS.
+2. **Why not the existing stack?** Postgres has no built-in queue with
+   blocking consumption, retries and backoff; building one is exactly the
+   "do not build a custom queue" ARCHITECTURE §4 warns against.
+3. **Operational cost:** one more service, Redis, already required from
+   Phase 1 for future caching and already in `docker-compose.yml`.
+4. **Local dev:** `docker compose up -d redis` (already required).
+5. **Production:** BullMQ's Redis connection needs
+   `maxRetriesPerRequest: null` on the ioredis client, or Workers throw at
+   construction; `createRedisConnection` sets this once.
+6. **Can we remove it?** Yes. Queue access is confined to
+   `packages/core/src/queue/` and `apps/worker/src/worker.ts`.
+
+## Google Gemini (Phase 4)
+1. **What problem does it solve?** The first model provider
+   (ARCHITECTURE §12, project decision: Gemini before OpenAI). Called
+   directly over `fetch`, not through a Google SDK, matching how the
+   provider-neutral `ReviewModel` interface is meant to be used: SDKs stay
+   out of the agent/review logic (ARCHITECTURE §12).
+2. **Why not the existing stack?** There is no model provider yet.
+3. **Operational cost:** none locally; in production, cost is per token
+   (PRODUCT_SPEC §20's "cost per review" metric) and rate limits, which the
+   adapter retries with backoff.
+4. **Local dev:** a `GEMINI_API_KEY` from https://aistudio.google.com/apikey.
+5. **Production:** the key is a secret, read once at startup
+   (`GEMINI_API_KEY`), sent in the `x-goog-api-key` header, never in a URL
+   or a log line. `GEMINI_MODEL` is pinned to a specific, non-preview model
+   rather than a `-latest` alias, so a provider-side default change cannot
+   silently change review behaviour.
+6. **Can we remove it?** Yes. `packages/core/src/llm/gemini.ts` is the only
+   file that knows about Gemini's request shape; the rest of the app uses
+   the `ReviewModel` interface.

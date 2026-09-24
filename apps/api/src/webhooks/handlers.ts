@@ -32,6 +32,8 @@ export interface WebhookOutcome {
   /** Internal installation ID, linked to the stored delivery. */
   installationId?: string;
   reason?: string;
+  /** Set when this event created or matched a review job, so the route can enqueue it. */
+  reviewJobId?: string;
 }
 
 /** The payload passed signature checks but does not match the expected shape. */
@@ -43,7 +45,7 @@ export class WebhookPayloadError extends Error {
 }
 
 /** Pull request actions that start an automatic review. */
-export const REVIEW_ACTIONS = new Set(['opened', 'synchronize', 'reopened']);
+export const REVIEW_ACTIONS = new Set(['opened', 'synchronize', 'reopened', 'ready_for_review']);
 
 function parse<T extends z.ZodType>(schema: T, eventName: string, payload: unknown): z.infer<T> {
   const result = schema.safeParse(payload);
@@ -180,6 +182,7 @@ async function onPullRequest(ctx: WebhookContext, payload: unknown): Promise<Web
   if (!REVIEW_ACTIONS.has(event.action))
     return ignored(`pull_request.${event.action} not reviewed`);
   if (event.pull_request.state !== 'open') return ignored('pull request is not open');
+  if (event.pull_request.draft) return ignored('pull request is a draft');
 
   const active = await activeRepository(ctx.db, event.installation.id, event.repository);
   if (!active) return ignored('installation or repository was removed');
@@ -205,7 +208,7 @@ async function onPullRequest(ctx: WebhookContext, payload: unknown): Promise<Web
     },
     created ? 'review job created' : 'review job already exists',
   );
-  return { status: 'PROCESSED', installationId: installation.id };
+  return { status: 'PROCESSED', installationId: installation.id, reviewJobId: job.id };
 }
 
 async function onPush(ctx: WebhookContext, payload: unknown): Promise<WebhookOutcome> {

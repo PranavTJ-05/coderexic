@@ -74,6 +74,14 @@ compiles core first, then apps against core's `dist/`.
   (`packages/core/src/github/`); nothing else imports Octokit. Webhook
   handlers only write to the database: no GitHub or LLM calls, so GitHub
   gets its response fast.
+- Model access goes through the `ReviewModel` interface
+  (`packages/core/src/llm/`); adapters (Gemini, later OpenAI/Anthropic/
+  Ollama) are the only files that know a provider's request shape.
+- Review jobs are created inside the webhook's DB transaction, then
+  enqueued to Redis after it commits (`apps/api/src/webhooks/route.ts`).
+  The worker's stale-job sweep (`apps/worker/src/worker.ts`) re-enqueues a
+  `PENDING` row whose enqueue never reached Redis, so an API-side failure
+  there cannot lose a job.
 
 ## Commands
 
@@ -81,7 +89,7 @@ compiles core first, then apps against core's `dist/`.
 pnpm install
 pnpm dev:api | pnpm dev:worker
 pnpm lint | pnpm typecheck | pnpm test | pnpm build
-pnpm test:integration                 # needs Postgres
+pnpm test:integration                 # needs Postgres and Redis
 pnpm db:generate | pnpm db:migrate
 pnpm format
 docker compose up -d postgres redis   # infra for local dev

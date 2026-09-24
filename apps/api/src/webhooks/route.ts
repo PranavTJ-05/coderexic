@@ -1,9 +1,12 @@
 import {
+  enqueueReviewJob,
   markWebhookEvent,
   recordWebhookEvent,
   verifyWebhookSignature,
   type Database,
+  type ReviewQueueJob,
 } from '@coderexic/core';
+import type { Queue } from 'bullmq';
 import type { FastifyInstance } from 'fastify';
 import { handleWebhookEvent, WebhookPayloadError } from './handlers.js';
 
@@ -13,6 +16,8 @@ export const WEBHOOK_BODY_LIMIT = 25 * 1024 * 1024;
 export interface WebhookRouteOptions {
   db: Database;
   secret: string;
+  /** Enqueues review jobs after their creating transaction commits. */
+  reviewQueue: Queue<ReviewQueueJob>;
 }
 
 function header(value: string | string[] | undefined): string | undefined {
@@ -27,7 +32,7 @@ function header(value: string | string[] | undefined): string | undefined {
  */
 export async function registerWebhookRoutes(
   app: FastifyInstance,
-  { db, secret }: WebhookRouteOptions,
+  { db, secret, reviewQueue }: WebhookRouteOptions,
 ): Promise<void> {
   await app.register((scope, _options, done) => {
     // The signature covers the exact bytes GitHub sent, so keep the raw body.
@@ -94,6 +99,15 @@ export async function registerWebhookRoutes(
           return result;
         });
         if (outcome.status === 'IGNORED') log.debug({ reason: outcome.reason }, 'delivery ignored');
+        if (outcome.reviewJobId) {
+          // Enqueued after the transaction committed, so the queue never
+          // references a review job the database does not yet have. If
+          // this fails, the row stays PENDING and the worker's stale-job
+          // sweep re-enqueues it later.
+          await enqueueReviewJob(reviewQueue, outcome.reviewJobId).catch((err: unknown) => {
+            log.error({ err, reviewJobId: outcome.reviewJobId }, 'failed to enqueue review job');
+          });
+        }
         return { status: outcome.status.toLowerCase() };
       } catch (err) {
         await markWebhookEvent(db, event.id, 'FAILED');

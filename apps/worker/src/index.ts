@@ -1,9 +1,43 @@
-import { baseEnvSchema, createLogger, parseEnv } from '@coderexic/core';
-import { createWorker } from './worker.js';
+import {
+  createDatabase,
+  createGeminiAdapter,
+  createGitHubApp,
+  createLogger,
+  createRedisConnection,
+  loadGeminiEnv,
+  loadGitHubAppCredentials,
+} from '@coderexic/core';
+import { loadWorkerEnv } from './env.js';
+import { createReviewWorker } from './worker.js';
 
-const env = parseEnv(baseEnvSchema);
+const env = loadWorkerEnv();
 const logger = createLogger({ name: 'worker', level: env.LOG_LEVEL });
-const worker = createWorker({ logger });
+
+const database = createDatabase({ url: env.DATABASE_URL });
+const redis = createRedisConnection(env.REDIS_URL);
+const githubApp = createGitHubApp({
+  credentials: loadGitHubAppCredentials(process.env, (message) => {
+    logger.warn(message);
+  }),
+  logger,
+});
+const geminiEnv = loadGeminiEnv(process.env);
+const model = createGeminiAdapter({
+  apiKey: geminiEnv.GEMINI_API_KEY,
+  model: geminiEnv.GEMINI_MODEL,
+  logger,
+});
+
+const worker = createReviewWorker({
+  logger,
+  db: database.db,
+  connection: redis,
+  githubApp,
+  model,
+  provider: 'gemini',
+  modelName: geminiEnv.GEMINI_MODEL,
+  concurrency: env.REVIEW_CONCURRENCY,
+});
 
 let shuttingDown = false;
 async function shutdown(signal: NodeJS.Signals): Promise<void> {
@@ -12,6 +46,8 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
   logger.info({ signal }, 'shutting down');
   try {
     await worker.stop();
+    await database.close();
+    redis.disconnect();
     process.exit(0);
   } catch (err) {
     logger.error({ err }, 'error during shutdown');
@@ -22,4 +58,9 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
 process.on('SIGTERM', (signal) => void shutdown(signal));
 process.on('SIGINT', (signal) => void shutdown(signal));
 
-await worker.start();
+try {
+  await worker.start();
+} catch (err) {
+  logger.fatal({ err }, 'failed to start worker');
+  process.exit(1);
+}

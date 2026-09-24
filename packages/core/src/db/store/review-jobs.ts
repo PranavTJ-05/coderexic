@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { and, eq, lt, sql } from 'drizzle-orm';
 import type { Executor } from '../client.js';
 import {
   reviewFindings,
@@ -82,6 +82,84 @@ export async function createReviewJob(
   return { job: existing, created: false };
 }
 
+/**
+ * Atomically marks a PENDING job RUNNING and bumps its attempt count.
+ * Returns undefined if another worker already claimed it (or it was not
+ * PENDING), so exactly one worker ever processes a given attempt.
+ */
+export async function claimReviewJob(
+  db: Executor,
+  reviewJobId: string,
+): Promise<ReviewJob | undefined> {
+  const [row] = await db
+    .update(reviewJobs)
+    .set({
+      status: 'RUNNING',
+      attemptCount: sql`${reviewJobs.attemptCount} + 1`,
+      startedAt: new Date(),
+    })
+    .where(and(eq(reviewJobs.id, reviewJobId), eq(reviewJobs.status, 'PENDING')))
+    .returning();
+  return row;
+}
+
+export async function findReviewJobById(db: Executor, id: string): Promise<ReviewJob | undefined> {
+  const [row] = await db.select().from(reviewJobs).where(eq(reviewJobs.id, id));
+  return row;
+}
+
+/** PENDING jobs older than `olderThan`, for the worker's stale-job sweep. */
+export async function findStalePendingReviewJobs(
+  db: Executor,
+  olderThan: Date,
+  limit = 50,
+): Promise<ReviewJob[]> {
+  return db
+    .select()
+    .from(reviewJobs)
+    .where(and(eq(reviewJobs.status, 'PENDING'), lt(reviewJobs.createdAt, olderThan)))
+    .limit(limit);
+}
+
+/**
+ * Marks a job FAILED or TIMED_OUT with no review record, for failures before
+ * any review data exists to persist (e.g. the PR or repository could not be
+ * fetched). When review data exists, use completeReview instead.
+ */
+export async function failReviewJob(
+  db: Executor,
+  reviewJobId: string,
+  status: Extract<ReviewJobStatus, 'FAILED' | 'TIMED_OUT'>,
+  errorCode: string,
+  errorMessage?: string,
+): Promise<void> {
+  await db
+    .update(reviewJobs)
+    .set({
+      status,
+      errorCode,
+      ...(errorMessage !== undefined && { errorMessage }),
+      completedAt: new Date(),
+    })
+    .where(eq(reviewJobs.id, reviewJobId));
+}
+
+/**
+ * Marks a job CANCELLED with no review record: a legitimate skip rather
+ * than a failure (e.g. the pull request turned into a draft before the
+ * worker got to it).
+ */
+export async function cancelReviewJob(
+  db: Executor,
+  reviewJobId: string,
+  reason: string,
+): Promise<void> {
+  await db
+    .update(reviewJobs)
+    .set({ status: 'CANCELLED', errorCode: reason, completedAt: new Date() })
+    .where(eq(reviewJobs.id, reviewJobId));
+}
+
 export interface CompleteReviewInput {
   reviewJobId: string;
   jobStatus: Extract<ReviewJobStatus, 'SUCCEEDED' | 'FAILED' | 'TIMED_OUT'>;
@@ -89,6 +167,8 @@ export interface CompleteReviewInput {
     status: Exclude<ReviewStatus, 'RUNNING'>;
   };
   findings: readonly NewReviewFinding[];
+  errorCode?: string;
+  errorMessage?: string;
   completedAt?: Date;
 }
 
@@ -100,7 +180,15 @@ export interface CompleteReviewInput {
  */
 export async function completeReview(
   db: Executor,
-  { reviewJobId, jobStatus, review, findings, completedAt = new Date() }: CompleteReviewInput,
+  {
+    reviewJobId,
+    jobStatus,
+    review,
+    findings,
+    errorCode,
+    errorMessage,
+    completedAt = new Date(),
+  }: CompleteReviewInput,
 ): Promise<{ review: Review; findings: ReviewFinding[] }> {
   return db.transaction(async (tx) => {
     const [storedReview] = await tx
@@ -119,7 +207,12 @@ export async function completeReview(
             .returning();
     const updated = await tx
       .update(reviewJobs)
-      .set({ status: jobStatus, completedAt })
+      .set({
+        status: jobStatus,
+        completedAt,
+        ...(errorCode !== undefined && { errorCode }),
+        ...(errorMessage !== undefined && { errorMessage }),
+      })
       .where(eq(reviewJobs.id, reviewJobId))
       .returning({ id: reviewJobs.id });
     if (updated.length === 0)
