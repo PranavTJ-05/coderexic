@@ -69,25 +69,25 @@ agent → findings → GitHub comments, without ambiguity.
 
 ## Phase 3: GitHub App
 **Goal:** receive events from GitHub and act on them securely.
-- [ ] GitHub App configuration
-- [ ] App authentication
-- [ ] Installation authentication
-- [ ] Webhook signature validation
-- [ ] Webhook parsing
-- [ ] Installation event
-- [ ] Pull request event
-- [ ] Push event
-- [ ] Issue comment event
-- [ ] PR metadata retrieval
-- [ ] PR file retrieval
-- [ ] File content retrieval
-- [ ] Review publishing
+- [ ] GitHub App configuration (code and docs done; live check with a registered App pending)
+- [x] App authentication
+- [x] Installation authentication
+- [x] Webhook signature validation
+- [x] Webhook parsing
+- [x] Installation event
+- [x] Pull request event
+- [x] Push event
+- [x] Issue comment event
+- [x] PR metadata retrieval
+- [x] PR file retrieval
+- [x] File content retrieval
+- [x] Review publishing
 
 **Security:**
-- [ ] Private key protection
-- [ ] Least privilege
-- [ ] Event idempotency
-- [ ] Rate-limit handling
+- [x] Private key protection
+- [x] Least privilege
+- [x] Event idempotency
+- [x] Rate-limit handling
 
 ## Phase 4: Basic diff reviewer
 **Goal:** the simplest useful product, before the agent exists: PR → diff →

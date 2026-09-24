@@ -1,7 +1,7 @@
-import { baseEnvSchema, parseEnv } from '@coderexic/core';
+import { baseEnvSchema, githubWebhookEnvSchema, parseEnv } from '@coderexic/core';
 import { z } from 'zod';
 
-export const apiEnvSchema = baseEnvSchema.extend({
+export const apiEnvSchema = baseEnvSchema.extend(githubWebhookEnvSchema.shape).extend({
   HOST: z.string().min(1).default('0.0.0.0'),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
 });
