@@ -92,14 +92,14 @@ agent → findings → GitHub comments, without ambiguity.
 ## Phase 4: Basic diff reviewer
 **Goal:** the simplest useful product, before the agent exists: PR → diff →
 LLM → structured findings → GitHub review.
-- [ ] LLM abstraction
-- [ ] First provider adapter (the spec said OpenAI; we're doing Gemini first)
-- [ ] Structured review schema
-- [ ] Finding validator
-- [ ] Line mapping
-- [ ] Summary generation
-- [ ] GitHub inline comments
-- [ ] Fallback PR comment
+- [x] LLM abstraction
+- [x] First provider adapter: Gemini (the spec said OpenAI; Gemini is the project's first provider)
+- [x] Structured review schema
+- [x] Finding validator
+- [x] Line mapping
+- [x] Summary generation
+- [x] GitHub inline comments
+- [x] Fallback PR comment
 
 **Done when:** opening a PR produces a real AI review. This proves the basic
 loop.

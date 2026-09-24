@@ -42,6 +42,14 @@ export async function upsertRepository(db: Executor, input: RepositoryInput): Pr
   });
 }
 
+export async function findRepositoryById(
+  db: Executor,
+  id: string,
+): Promise<Repository | undefined> {
+  const [row] = await db.select().from(repositories).where(eq(repositories.id, id));
+  return row;
+}
+
 export async function findRepository(
   db: Executor,
   installationId: string,

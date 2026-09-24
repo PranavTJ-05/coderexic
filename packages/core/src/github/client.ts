@@ -195,6 +195,16 @@ export function createGitHubClient(octokit: OctokitInstance): GitHubClient {
       };
     },
 
+    async listReviewBodies({ owner, repo }, pullNumber) {
+      const reviews = await octokit.paginate(octokit.rest.pulls.listReviews, {
+        owner,
+        repo,
+        pull_number: pullNumber,
+        per_page: 100,
+      });
+      return reviews.map((review) => review.body).reverse();
+    },
+
     async createReview({ owner, repo }, input: CreateReviewInput) {
       const { data } = await octokit.rest.pulls.createReview({
         owner,

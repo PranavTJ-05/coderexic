@@ -78,6 +78,8 @@ export interface GitHubClient {
     maxBytes?: number,
   ): Promise<string | null>;
   getRepositoryTree(ref: RepoRef, commitSha: string): Promise<RepositoryTree>;
+  /** Review body text, newest first; used to detect a review already posted by a retried job. */
+  listReviewBodies(ref: RepoRef, pullNumber: number): Promise<(string | null)[]>;
   /** Posts a review with inline comments; returns the GitHub review ID. */
   createReview(ref: RepoRef, input: CreateReviewInput): Promise<number>;
   /** Posts a PR-level comment; returns the GitHub comment ID. */

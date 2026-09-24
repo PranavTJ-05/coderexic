@@ -27,6 +27,14 @@ export async function upsertInstallation(
   return row;
 }
 
+export async function findInstallationById(
+  db: Executor,
+  id: string,
+): Promise<Installation | undefined> {
+  const [row] = await db.select().from(installations).where(eq(installations.id, id));
+  return row;
+}
+
 export async function findInstallationByGithubId(
   db: Executor,
   githubInstallationId: number,

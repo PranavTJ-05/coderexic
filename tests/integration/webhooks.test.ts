@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   createLogger,
+  createReviewQueue,
   installations,
   repositories,
   reviewJobs,
@@ -11,6 +12,7 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildServer } from '../../apps/api/src/server.js';
 import { useTestDatabase } from './helpers/db.js';
+import { useTestRedis } from './helpers/redis.js';
 
 const SECRET = 'integration-webhook-secret-0123';
 const INSTALLATION_ID = 31_337;
@@ -51,6 +53,8 @@ function pullRequest(action: string, headSha = sha('a'), number = 12) {
 describe('POST /webhooks/github', () => {
   const database = useTestDatabase();
   const { db } = database;
+  const redis = useTestRedis();
+  const reviewQueue = createReviewQueue(redis);
   let app: Awaited<ReturnType<typeof buildServer>>;
 
   beforeAll(async () => {
@@ -58,9 +62,14 @@ describe('POST /webhooks/github', () => {
       logger: createLogger({ name: 'webhook-test', level: 'silent' }),
       database,
       webhookSecret: SECRET,
+      reviewQueue,
     });
   });
-  afterAll(() => app.close());
+  afterAll(async () => {
+    await app.close();
+    await reviewQueue.obliterate({ force: true });
+    await reviewQueue.close();
+  });
 
   function deliver(
     event: string,
@@ -204,6 +213,8 @@ describe('POST /webhooks/github', () => {
         status: 'PENDING',
         githubEventId: 'pr-1',
       });
+      const queued = await reviewQueue.getJob(job!.id);
+      expect(queued?.data).toEqual({ reviewJobId: job!.id });
     });
 
     it('records the installation and repository if their events were missed', async () => {
@@ -288,6 +299,20 @@ describe('POST /webhooks/github', () => {
       const res = await deliver('pull_request', pullRequest(action));
       expect(res.json()).toEqual({ status: 'ignored' });
       expect(await db.select().from(reviewJobs)).toEqual([]);
+    });
+
+    it('a draft pull request is not reviewed', async () => {
+      const payload = pullRequest('opened');
+      payload.pull_request.draft = true;
+      const res = await deliver('pull_request', payload);
+      expect(res.json()).toEqual({ status: 'ignored' });
+      expect(await db.select().from(reviewJobs)).toEqual([]);
+    });
+
+    it('ready_for_review starts a review, like opened', async () => {
+      const res = await deliver('pull_request', pullRequest('ready_for_review'));
+      expect(res.json()).toEqual({ status: 'processed' });
+      expect(await db.select().from(reviewJobs)).toHaveLength(1);
     });
 
     it('a malformed payload returns 400 and is recorded as failed', async () => {

@@ -76,6 +76,16 @@ services:
       target: worker
     environment:
       <<: *app-env
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      # GITHUB_PRIVATE_KEY_PATH (a host path) isn't usable in the container;
+      # the host file, if set, is bind-mounted read-only below instead.
+      GITHUB_PRIVATE_KEY_PATH: /run/secrets/github-app.pem
+      # Set only if the key is provided inline instead (e.g. from a secret manager).
+      GITHUB_PRIVATE_KEY: ${GITHUB_PRIVATE_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-}
+    volumes:
+      - ${GITHUB_PRIVATE_KEY_PATH:-/dev/null}:/run/secrets/github-app.pem:ro
     depends_on:
       migrate:
         condition: service_completed_successfully

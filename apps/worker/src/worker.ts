@@ -1,4 +1,31 @@
-import type { Logger } from '@coderexic/core';
+import {
+  createReviewQueue,
+  createReviewQueueWorker,
+  enqueueReviewJob,
+  findStalePendingReviewJobs,
+  type Database,
+  type GitHubApp,
+  type Logger,
+  type ReviewModel,
+  type ReviewQueueJob,
+} from '@coderexic/core';
+import type { ConnectionOptions, Job, Queue, Worker as BullWorker } from 'bullmq';
+import { processReviewJob } from './review/pipeline.js';
+
+export interface ReviewWorkerDeps {
+  logger: Logger;
+  db: Database;
+  connection: ConnectionOptions;
+  githubApp: GitHubApp;
+  model: ReviewModel;
+  provider: string;
+  modelName: string;
+  concurrency?: number;
+  /** How often the stale-job sweep runs. */
+  sweepIntervalMs?: number;
+  /** A PENDING job older than this is considered stuck and re-enqueued. */
+  staleAfterMs?: number;
+}
 
 export interface Worker {
   start(): Promise<void>;
@@ -6,33 +33,77 @@ export interface Worker {
   readonly running: boolean;
 }
 
+const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60_000;
+const DEFAULT_STALE_AFTER_MS = 5 * 60_000;
+
 /**
- * Worker lifecycle shell. Queue consumers (review and indexing jobs) are
- * attached here in later phases; for now it only manages start and stop.
+ * Consumes review jobs from Redis and runs them through the review
+ * pipeline. Also sweeps for PENDING review_jobs rows with no matching queue
+ * entry (an enqueue that failed after its webhook transaction committed)
+ * and re-enqueues them; enqueueReviewJob's jobId makes this a no-op for
+ * jobs that are already queued or already finished.
  */
-export function createWorker({ logger }: { logger: Logger }): Worker {
+export function createReviewWorker(deps: ReviewWorkerDeps): Worker {
   let running = false;
-  let keepAlive: NodeJS.Timeout | undefined;
+  let queue: Queue<ReviewQueueJob> | undefined;
+  let consumer: BullWorker<ReviewQueueJob> | undefined;
+  let sweepInterval: NodeJS.Timeout | undefined;
+
+  const sweep = async (): Promise<void> => {
+    const olderThan = new Date(Date.now() - (deps.staleAfterMs ?? DEFAULT_STALE_AFTER_MS));
+    const stale = await findStalePendingReviewJobs(deps.db, olderThan);
+    if (stale.length === 0 || !queue) return;
+    for (const job of stale) await enqueueReviewJob(queue, job.id);
+    deps.logger.warn({ count: stale.length }, 'stale-job sweep re-enqueued pending review jobs');
+  };
 
   return {
     get running() {
       return running;
     },
-    start() {
-      if (running) return Promise.resolve();
+    async start() {
+      if (running) return;
       running = true;
-      // Holds the event loop open until consumers exist to do it.
-      keepAlive = setInterval(() => undefined, 60_000);
-      logger.info('worker started');
-      return Promise.resolve();
+      queue = createReviewQueue(deps.connection);
+      consumer = createReviewQueueWorker(
+        deps.connection,
+        (job) =>
+          processReviewJob(
+            {
+              db: deps.db,
+              githubApp: deps.githubApp,
+              model: deps.model,
+              provider: deps.provider,
+              modelName: deps.modelName,
+              logger: deps.logger,
+            },
+            job.reviewJobId,
+          ),
+        { ...(deps.concurrency !== undefined && { concurrency: deps.concurrency }) },
+      );
+      consumer.on('failed', (job: Job<ReviewQueueJob> | undefined, err: Error) => {
+        deps.logger.error({ reviewJobId: job?.data.reviewJobId, err }, 'review job attempt failed');
+      });
+      await sweep().catch((err: unknown) => {
+        deps.logger.error({ err }, 'startup sweep failed');
+      });
+      sweepInterval = setInterval(() => {
+        void sweep().catch((err: unknown) => {
+          deps.logger.error({ err }, 'sweep failed');
+        });
+      }, deps.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS);
+      deps.logger.info('worker started');
     },
-    stop() {
-      if (!running) return Promise.resolve();
+    async stop() {
+      if (!running) return;
       running = false;
-      clearInterval(keepAlive);
-      keepAlive = undefined;
-      logger.info('worker stopped');
-      return Promise.resolve();
+      clearInterval(sweepInterval);
+      sweepInterval = undefined;
+      await consumer?.close();
+      await queue?.close();
+      consumer = undefined;
+      queue = undefined;
+      deps.logger.info('worker stopped');
     },
   };
 }

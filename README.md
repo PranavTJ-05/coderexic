@@ -7,9 +7,10 @@ consults a dependency graph of the repository (what the changed files
 import and what depends on them), lets an AI agent fetch the related code
 it needs, and posts validated findings as inline review comments.
 
-> **Status:** Phase 3 (GitHub App). Webhooks are verified and recorded, pull
-> requests create pending review jobs, and the GitHub client can read PRs
-> and publish reviews. Reviewing itself starts in Phase 4. See [ROADMAP.md](ROADMAP.md).
+> **Status:** Phase 4 (basic diff reviewer). Opening a pull request queues a
+> review job; the worker asks Gemini for findings on the diff and posts them
+> as an inline GitHub review. Repository-specific rules and config start in
+> Phase 5. See [ROADMAP.md](ROADMAP.md).
 
 ## Requirements
 
@@ -45,7 +46,7 @@ curl http://127.0.0.1:3000/health
 | `pnpm lint`         | ESLint (type-aware) across the workspace      |
 | `pnpm typecheck`    | `tsc --noEmit` per package; no build needed   |
 | `pnpm test`         | Unit tests (Vitest, no services needed)       |
-| `pnpm test:integration` | Postgres-backed tests (throwaway database) |
+| `pnpm test:integration` | Postgres + Redis-backed tests (throwaway DB/queue) |
 | `pnpm db:generate`  | Generate a SQL migration from the schema      |
 | `pnpm db:migrate`   | Apply pending migrations                      |
 | `pnpm github:smoke` | Check GitHub App access against a real repo   |
@@ -56,9 +57,10 @@ curl http://127.0.0.1:3000/health
 
 ```text
 apps/api        Fastify server: webhooks, health, settings APIs
-apps/worker     Background jobs: repository indexing and reviews
-packages/core   Shared code: env validation, logging, and later
-                GitHub, agent, LLM, indexer, config and DB modules
+apps/worker     Consumes review jobs from Redis, calls the LLM, publishes
+                GitHub reviews
+packages/core   Shared code: env, logging, db, github, queue, llm, review
+                (later: agent, indexer, config)
 ```
 
 ## Documentation
