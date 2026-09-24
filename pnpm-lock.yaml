@@ -98,6 +98,9 @@ importers:
       postgres:
         specifier: ^3.4.9
         version: 3.4.9
+      typescript:
+        specifier: ~6.0.3
+        version: 6.0.3
       yaml:
         specifier: ^2.9.1
         version: 2.9.1

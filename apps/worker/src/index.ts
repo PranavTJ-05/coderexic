@@ -8,6 +8,7 @@ import {
   loadGitHubAppCredentials,
 } from '@coderexic/core';
 import { loadWorkerEnv } from './env.js';
+import { createIndexWorker } from './index-run/worker.js';
 import { createReviewWorker } from './worker.js';
 
 const env = loadWorkerEnv();
@@ -39,13 +40,21 @@ const worker = createReviewWorker({
   concurrency: env.REVIEW_CONCURRENCY,
 });
 
+const indexWorker = createIndexWorker({
+  logger,
+  db: database.db,
+  connection: redis,
+  githubApp,
+  concurrency: env.INDEX_CONCURRENCY,
+});
+
 let shuttingDown = false;
 async function shutdown(signal: NodeJS.Signals): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   logger.info({ signal }, 'shutting down');
   try {
-    await worker.stop();
+    await Promise.all([worker.stop(), indexWorker.stop()]);
     await database.close();
     redis.disconnect();
     process.exit(0);
@@ -59,7 +68,7 @@ process.on('SIGTERM', (signal) => void shutdown(signal));
 process.on('SIGINT', (signal) => void shutdown(signal));
 
 try {
-  await worker.start();
+  await Promise.all([worker.start(), indexWorker.start()]);
 } catch (err) {
   logger.fatal({ err }, 'failed to start worker');
   process.exit(1);

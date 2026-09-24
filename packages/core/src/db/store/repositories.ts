@@ -50,6 +50,15 @@ export async function findRepositoryById(
   return row;
 }
 
+/** For one-off scripts and manual lookups; webhook code paths always know the installation ID instead. */
+export async function findRepositoryByFullName(
+  db: Executor,
+  fullName: string,
+): Promise<Repository | undefined> {
+  const [row] = await db.select().from(repositories).where(eq(repositories.fullName, fullName));
+  return row;
+}
+
 export async function findRepository(
   db: Executor,
   installationId: string,

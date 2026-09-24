@@ -1,4 +1,5 @@
 import {
+  createIndexRun,
   createReviewJob,
   automaticReviewKey,
   upsertInstallation,
@@ -41,4 +42,10 @@ export async function makeReviewJob(db: Executor, headSha = 'a'.repeat(40)) {
     idempotencyKey: automaticReviewKey(repository.id, 7, headSha),
   });
   return { repository, job };
+}
+
+export async function makeIndexRun(db: Executor, commitSha = 'a'.repeat(40)) {
+  const repository = await makeRepository(db);
+  const run = await createIndexRun(db, repository.id, commitSha);
+  return { repository, run };
 }

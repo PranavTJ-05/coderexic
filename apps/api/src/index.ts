@@ -1,5 +1,6 @@
 import {
   createDatabase,
+  createIndexQueue,
   createLogger,
   createRedisConnection,
   createReviewQueue,
@@ -12,12 +13,14 @@ const logger = createLogger({ name: 'api', level: env.LOG_LEVEL });
 const database = createDatabase({ url: env.DATABASE_URL });
 const redis = createRedisConnection(env.REDIS_URL);
 const reviewQueue = createReviewQueue(redis);
+const indexQueue = createIndexQueue(redis);
 const app = await buildServer({
   logger,
   version: process.env.npm_package_version ?? '0.0.0',
   database,
   webhookSecret: env.GITHUB_WEBHOOK_SECRET,
   reviewQueue,
+  indexQueue,
 });
 
 let shuttingDown = false;
@@ -28,6 +31,7 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
   try {
     await app.close();
     await reviewQueue.close();
+    await indexQueue.close();
     redis.disconnect();
     await database.close();
     process.exit(0);

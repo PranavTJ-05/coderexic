@@ -13,6 +13,7 @@
     "db:generate": "pnpm --filter @coderexic/core db:generate",
     "db:migrate": "pnpm --filter @coderexic/api db:migrate",
     "github:smoke": "pnpm --filter @coderexic/api github:smoke",
+    "graph:index": "pnpm --filter @coderexic/worker graph:index",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck && tsc -p tests --noEmit",
     "lint": "eslint .",

@@ -7,11 +7,14 @@ consults a dependency graph of the repository (what the changed files
 import and what depends on them), lets an AI agent fetch the related code
 it needs, and posts validated findings as inline review comments.
 
-> **Status:** Phase 5 (repository configuration). Opening a pull request
-> queues a review job; the worker asks Gemini for findings on the diff and
-> posts them as an inline GitHub review, now shaped by each repo's own
+> **Status:** Phase 6 (dependency graph). Opening a pull request queues a
+> review job; the worker asks Gemini for findings on the diff and posts
+> them as an inline GitHub review, shaped by each repo's own
 > `.coderexic.yml`/`.verix.yml` and rules file (loaded from the PR's base
-> commit). The dependency graph (Phase 6) is next. See
+> commit). A push now also queues an incremental dependency-graph index
+> (TypeScript/JavaScript/Python/Go/Rust/Java/Ruby import resolution,
+> forward and reverse edges), though the review pipeline doesn't consume
+> it yet - that's the context engine (Phase 7). See
 > [ROADMAP.md](ROADMAP.md).
 
 ## Requirements
@@ -59,10 +62,11 @@ curl http://127.0.0.1:3000/health
 
 ```text
 apps/api        Fastify server: webhooks, health, settings APIs
-apps/worker     Consumes review jobs from Redis, calls the LLM, publishes
-                GitHub reviews
+apps/worker     Consumes review jobs and index runs from Redis; calls the
+                LLM and publishes GitHub reviews; builds the dependency
+                graph
 packages/core   Shared code: env, logging, db, github, queue, llm, review,
-                config (later: agent, indexer)
+                config, graph (later: agent)
 ```
 
 ## Documentation

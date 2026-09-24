@@ -95,3 +95,30 @@ Webhook signature verification uses `node:crypto`, not a library.
    config rather than a crash (PRODUCT_SPEC §18).
 6. **Can we remove it?** Yes. Only `packages/core/src/config/loader.ts`
    imports it.
+
+## typescript (Phase 6, runtime dependency of @coderexic/core)
+1. **What problem does it solve?** Extracts imports/exports/requires from
+   TypeScript and JavaScript source for the dependency graph
+   (`graph/extract/typescript.ts`), and parses `tsconfig.json`'s JSONC
+   syntax for path-alias resolution (`graph/tsconfig.ts`).
+2. **Why not the existing stack?** `typescript` was already a devDependency
+   for building the project itself. Its compiler API
+   (`ts.preProcessFile`, `ts.parseConfigFileTextToJson`) is the real parser
+   GitHub's own files were written against, so it handles ES imports,
+   `export ... from`, dynamic `import()`, CommonJS `require()`, and
+   JSONC comments/trailing commas correctly in one pass, instead of a
+   hand-rolled regex extractor per import style.
+3. **Operational cost:** adds the TypeScript compiler to the worker's
+   runtime bundle; it's a pure, synchronous, in-process parse, no network
+   or extra services.
+4. **Local dev:** nothing to configure.
+5. **Production:** file content is untrusted repository input, so the
+   indexer caps each file at `MAX_FILE_BYTES` and the whole tree crawl at
+   `DEFAULT_MAX_FILES` before ever calling into the parser; a parse
+   failure on one file is caught per-file and that file is simply
+   skipped (no edges), never crashing the run.
+6. **Can we remove it?** No, without replacing the TS/JS extractor and
+   the tsconfig alias resolver; it was moved from a devDependency to a
+   runtime `dependencies` entry in `packages/core/package.json`
+   specifically because `graph/extract/typescript.ts` and
+   `graph/tsconfig.ts` import it at runtime, not just at build time.
