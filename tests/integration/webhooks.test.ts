@@ -239,6 +239,51 @@ describe('POST /webhooks/github', () => {
       expect(jobs.map((j) => j.headSha).sort()).toEqual([sha('a'), sha('c')]);
     });
 
+    it('a late event does not bring back an uninstalled installation', async () => {
+      await deliver('installation', installationCreated());
+      await deliver('installation', { ...installationCreated(), action: 'deleted' });
+      const res = await deliver('pull_request', pullRequest('opened'));
+      expect(res.json()).toEqual({ status: 'ignored' });
+      const [installation] = await db.select().from(installations);
+      expect(installation!.removedAt).toBeInstanceOf(Date);
+      expect(await db.select().from(reviewJobs)).toEqual([]);
+    });
+
+    it('a late event does not bring back a deselected repository', async () => {
+      await deliver('installation', installationCreated());
+      await deliver('installation_repositories', {
+        action: 'removed',
+        installation: { id: INSTALLATION_ID, account: owner },
+        repositories_added: [],
+        repositories_removed: [
+          { id: repository.id, name: repository.name, full_name: repository.full_name },
+        ],
+      });
+      expect(
+        (
+          await deliver('push', {
+            ref: 'refs/heads/main',
+            after: sha('d'),
+            deleted: false,
+            installation: { id: INSTALLATION_ID },
+            repository,
+          })
+        ).json(),
+      ).toEqual({ status: 'ignored' });
+      const [repo] = await db.select().from(repositories);
+      expect(repo).toMatchObject({ headSha: null });
+      expect(repo!.removedAt).toBeInstanceOf(Date);
+    });
+
+    it('reinstalling makes the repository reviewable again', async () => {
+      await deliver('installation', installationCreated());
+      await deliver('installation', { ...installationCreated(), action: 'deleted' });
+      await deliver('installation', installationCreated());
+      expect((await deliver('pull_request', pullRequest('opened'))).json()).toEqual({
+        status: 'processed',
+      });
+    });
+
     it.each(['closed', 'labeled', 'edited'])('%s is ignored', async (action) => {
       const res = await deliver('pull_request', pullRequest(action));
       expect(res.json()).toEqual({ status: 'ignored' });

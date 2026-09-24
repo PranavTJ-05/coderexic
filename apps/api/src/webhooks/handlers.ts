@@ -1,6 +1,8 @@
 import {
   automaticReviewKey,
   createReviewJob,
+  findInstallationByGithubId,
+  findRepository,
   installationEventSchema,
   installationRepositoriesEventSchema,
   issueCommentEventSchema,
@@ -74,17 +76,29 @@ async function syncRepository(
   });
 }
 
-/** Events for a repository imply the installation exists; record it if we missed its event. */
-async function installationFor(
+/**
+ * Resolves the installation and repository a repository event belongs to.
+ * Records them if their own events were missed, but returns undefined for
+ * an uninstalled installation or a deselected repository, so a late or
+ * redelivered event never brings them back.
+ */
+async function activeRepository(
   db: Executor,
   githubInstallationId: number,
   repository: WebhookRepository,
-): Promise<Installation> {
-  return upsertInstallation(db, {
-    githubInstallationId,
-    ownerType: repository.owner.type,
-    ownerLogin: repository.owner.login,
-  });
+): Promise<{ installation: Installation; repository: Repository } | undefined> {
+  const known = await findInstallationByGithubId(db, githubInstallationId);
+  if (known?.removedAt) return undefined;
+  const installation =
+    known ??
+    (await upsertInstallation(db, {
+      githubInstallationId,
+      ownerType: repository.owner.type,
+      ownerLogin: repository.owner.login,
+    }));
+  const knownRepo = await findRepository(db, installation.id, repository.id);
+  if (knownRepo?.removedAt) return undefined;
+  return { installation, repository: await syncRepository(db, installation, repository) };
 }
 
 async function onInstallation(ctx: WebhookContext, payload: unknown): Promise<WebhookOutcome> {
@@ -167,8 +181,9 @@ async function onPullRequest(ctx: WebhookContext, payload: unknown): Promise<Web
     return ignored(`pull_request.${event.action} not reviewed`);
   if (event.pull_request.state !== 'open') return ignored('pull request is not open');
 
-  const installation = await installationFor(ctx.db, event.installation.id, event.repository);
-  const repository = await syncRepository(ctx.db, installation, event.repository);
+  const active = await activeRepository(ctx.db, event.installation.id, event.repository);
+  if (!active) return ignored('installation or repository was removed');
+  const { installation, repository } = active;
   const headSha = event.pull_request.head.sha;
   const { job, created } = await createReviewJob(ctx.db, {
     repositoryId: repository.id,
@@ -199,8 +214,9 @@ async function onPush(ctx: WebhookContext, payload: unknown): Promise<WebhookOut
   if (event.ref !== `refs/heads/${event.repository.default_branch}`) {
     return ignored('push is not to the default branch');
   }
-  const installation = await installationFor(ctx.db, event.installation.id, event.repository);
-  const repository = await syncRepository(ctx.db, installation, event.repository);
+  const active = await activeRepository(ctx.db, event.installation.id, event.repository);
+  if (!active) return ignored('installation or repository was removed');
+  const { installation, repository } = active;
   await updateRepositoryHead(ctx.db, repository.id, event.after);
   ctx.log.info(
     { repository: repository.fullName, headSha: event.after },

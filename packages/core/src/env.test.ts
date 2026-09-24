@@ -15,6 +15,17 @@ describe('parseEnv', () => {
     expect(env.DATABASE_URL).toBe(valid.DATABASE_URL);
   });
 
+  it('treats an empty value as unset', () => {
+    let error: unknown;
+    try {
+      parseEnv(baseEnvSchema, { ...valid, DATABASE_URL: '' });
+    } catch (err) {
+      error = err;
+    }
+    expect((error as EnvValidationError).issues).toEqual(['DATABASE_URL: required']);
+    expect(parseEnv(baseEnvSchema, { ...valid, LOG_LEVEL: '' }).LOG_LEVEL).toBe('info');
+  });
+
   it('reports a missing required variable by name', () => {
     const { DATABASE_URL: _omitted, ...rest } = valid;
     expect(() => parseEnv(baseEnvSchema, rest)).toThrow(EnvValidationError);

@@ -44,6 +44,15 @@ describe('loadGitHubAppCredentials', () => {
     ).toBe(privateKey);
   });
 
+  it('ignores a blank key path when an inline key is set', () => {
+    const creds = loadGitHubAppCredentials({
+      GITHUB_APP_ID: '1',
+      GITHUB_PRIVATE_KEY_PATH: '',
+      GITHUB_PRIVATE_KEY: privateKey,
+    });
+    expect(creds.privateKey).toBe(privateKey);
+  });
+
   it('requires one of the key variables', () => {
     expect(() => loadGitHubAppCredentials({ GITHUB_APP_ID: '1' })).toThrow(/GITHUB_PRIVATE_KEY/);
   });

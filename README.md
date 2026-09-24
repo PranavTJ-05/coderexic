@@ -22,6 +22,8 @@ it needs, and posts validated findings as inline review comments.
 ```bash
 pnpm install
 cp .env.example .env              # adjust ports if 5432/6379/3000 are taken
+# The API needs a webhook secret to start, even without a GitHub App yet:
+sed -i "s/^GITHUB_WEBHOOK_SECRET=.*/GITHUB_WEBHOOK_SECRET=$(openssl rand -hex 32)/" .env
 
 docker compose up -d postgres redis
 pnpm db:migrate
