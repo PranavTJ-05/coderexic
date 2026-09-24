@@ -1,6 +1,6 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import type { Executor } from '../client.js';
-import { repositories, repositorySettings } from '../schema.js';
+import { ignorePatterns, repositories, repositorySettings } from '../schema.js';
 
 export type Repository = typeof repositories.$inferSelect;
 export type RepositorySettings = typeof repositorySettings.$inferSelect;
@@ -76,6 +76,15 @@ export async function getRepositorySettings(
     .from(repositorySettings)
     .where(eq(repositorySettings.repositoryId, repositoryId));
   return row;
+}
+
+/** The repo's persistent ignore-glob list (`ignore_patterns`), the DB layer of PRODUCT_SPEC.md §11's config. */
+export async function listIgnorePatterns(db: Executor, repositoryId: string): Promise<string[]> {
+  const rows = await db
+    .select({ pattern: ignorePatterns.pattern })
+    .from(ignorePatterns)
+    .where(eq(ignorePatterns.repositoryId, repositoryId));
+  return rows.map((row) => row.pattern);
 }
 
 /** Soft-removes repositories deselected from an installation. */

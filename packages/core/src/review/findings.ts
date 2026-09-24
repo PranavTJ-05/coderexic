@@ -1,7 +1,23 @@
 import type { NewReviewFinding, ReviewFinding } from '../db/store/review-jobs.js';
 import type { CreateReviewInput, ReviewComment } from '../github/types.js';
 import type { ModelFinding } from '../llm/types.js';
+import { matchesGlob } from './diff-filter.js';
 import { firstAddedLine, hunkAt, isAddedLine, parseHunks, type Hunk } from './hunks.js';
+
+/**
+ * Drops findings on a path the repo's config asks to skip (PRODUCT_SPEC.md
+ * step 8: severity and ignore filtering happen before placement, so an
+ * ignored file's findings never reach the summary fallback either).
+ */
+export function filterIgnoredPaths(
+  findings: readonly ModelFinding[],
+  ignoreGlobs: readonly string[],
+): ModelFinding[] {
+  if (ignoreGlobs.length === 0) return [...findings];
+  return findings.filter(
+    (finding) => !ignoreGlobs.some((glob) => matchesGlob(finding.filename, glob)),
+  );
+}
 
 /** Lower index = more severe (matches DATA_MODEL.md §15). */
 const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low'] as const;

@@ -106,19 +106,27 @@ loop.
 
 ## Phase 5: Repository configuration
 **Goal:** repos control how they're reviewed.
-- [ ] VERIX.md-compatible loader (plus CODEREXIC.md)
-- [ ] Fallback rules files
-- [ ] .verix.yml-compatible config (plus .coderexic.yml)
-- [ ] Ignore patterns
-- [ ] Minimum severity
-- [ ] Language hint
-- [ ] Model override
-- [ ] Max agent files
-- [ ] Max depth
+- [x] VERIX.md-compatible loader (plus CODEREXIC.md, ranked first)
+- [x] Fallback rules files (CODEREXIC.md, VERIX.md, .verix.md, CLAUDE.md, AGENTS.md, .cursorrules)
+- [x] .verix.yml-compatible config (plus .coderexic.yml, ranked first)
+- [x] Ignore patterns (DB `ignore_patterns` rows + yml `ignore`, combined;
+      applied both to file selection and to findings before placement)
+- [x] Minimum severity
+- [x] Language hint (passed into the review prompt)
+- [x] Model override (validated against supported providers - Gemini only
+      today; an unsupported value is dropped with a warning, not an error.
+      A real provider switch arrives with Phase 10's provider factory.)
+- [x] Max agent files (`max_files`, parsed and clamped; no consumer until
+      Phase 8's tool executor)
+- [x] Max depth (`depth`, parsed and clamped; no consumer until Phase 9's
+      agent loop)
 
 **Security:**
-- [ ] Rules treated as untrusted input
-- [ ] Rules can't override system security
+- [x] Rules treated as untrusted input (fenced in the prompt, system prompt
+      states it can never override instructions; fence delimiters in the
+      content itself are neutralized so it can't forge its own close)
+- [x] Rules can't override system security (same fencing; config numeric
+      fields are clamped to system-wide caps, never trusted verbatim)
 
 ## Phase 6: Dependency graph
 **Goal:** understand how the repo's files relate.

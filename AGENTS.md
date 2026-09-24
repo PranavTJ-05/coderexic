@@ -82,6 +82,14 @@ compiles core first, then apps against core's `dist/`.
   The worker's stale-job sweep (`apps/worker/src/worker.ts`) re-enqueues a
   `PENDING` row whose enqueue never reached Redis, so an API-side failure
   there cannot lose a job.
+- Repo config (`packages/core/src/config/`) is layered, not written back:
+  app defaults, then `repository_settings`/`ignore_patterns` (the DB layer
+  Phase 13's settings UI will own), then `.coderexic.yml`/rules file
+  computed fresh per job. Never persist yml values into `repository_settings`.
+  Always load the yml/rules file from the PR's **base** sha, never head -
+  reading from head lets a PR edit its own review rules to silence findings
+  about itself. A bad config field falls back to defaults for that field
+  only and is reported in the posted review, never silently dropped.
 
 ## Commands
 

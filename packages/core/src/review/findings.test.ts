@@ -4,6 +4,7 @@ import {
   buildCreateReviewInput,
   buildReview,
   dedupeFindings,
+  filterIgnoredPaths,
   hasReviewMarker,
   placeFindings,
   reviewMarker,
@@ -158,5 +159,23 @@ describe('buildCreateReviewInput', () => {
     expect(input.body).toContain('Looks mostly fine.');
     expect(input.body).toContain('stray issue');
     expect(input.body).toContain(reviewMarker('job-42'));
+  });
+});
+
+describe('filterIgnoredPaths', () => {
+  it('returns findings unchanged when there are no ignore globs', () => {
+    const findings = [finding({ filename: 'src/a.ts' })];
+    expect(filterIgnoredPaths(findings, [])).toEqual(findings);
+  });
+
+  it('drops findings on a path matching an ignore glob', () => {
+    const kept = finding({ filename: 'src/keep.ts' });
+    const dropped = finding({ filename: 'dist/bundle.js' });
+    expect(filterIgnoredPaths([kept, dropped], ['dist/**'])).toEqual([kept]);
+  });
+
+  it('matches against any of several ignore globs', () => {
+    const dropped = finding({ filename: 'src/a.test.ts' });
+    expect(filterIgnoredPaths([dropped], ['dist/**', '*.test.ts'])).toEqual([]);
   });
 });
