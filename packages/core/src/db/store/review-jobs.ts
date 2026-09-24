@@ -31,6 +31,14 @@ export function manualReviewKey(githubEventId: string): string {
   return `manual:${githubEventId}`;
 }
 
+/** An idempotency key was reused for a different pull request or commit. */
+export class IdempotencyConflictError extends Error {
+  constructor(readonly idempotencyKey: string) {
+    super(`review job idempotency key reused for a different job: ${idempotencyKey}`);
+    this.name = 'IdempotencyConflictError';
+  }
+}
+
 export interface ReviewJobInput {
   repositoryId: string;
   installationId: string;
@@ -44,7 +52,8 @@ export interface ReviewJobInput {
 
 /**
  * Inserts a review job unless one with the same idempotency key exists.
- * Returns the stored job and whether this call created it.
+ * Returns the stored job and whether this call created it. Throws
+ * IdempotencyConflictError if the existing job has a different identity.
  */
 export async function createReviewJob(
   db: Executor,
@@ -63,6 +72,13 @@ export async function createReviewJob(
     .from(reviewJobs)
     .where(eq(reviewJobs.idempotencyKey, input.idempotencyKey));
   if (!existing) throw new Error('createReviewJob: conflicting job not found');
+  const sameIdentity =
+    existing.repositoryId === input.repositoryId &&
+    existing.installationId === input.installationId &&
+    existing.pullRequestNumber === input.pullRequestNumber &&
+    existing.headSha === input.headSha &&
+    existing.triggerType === input.triggerType;
+  if (!sameIdentity) throw new IdempotencyConflictError(input.idempotencyKey);
   return { job: existing, created: false };
 }
 
@@ -79,6 +95,8 @@ export interface CompleteReviewInput {
 /**
  * Persists a finished review, its findings and the job's final status in one
  * transaction, so a failure never leaves findings without a completed job.
+ * Safe to retry: a repeated call replaces the review's findings rather than
+ * adding to them.
  */
 export async function completeReview(
   db: Executor,
@@ -91,6 +109,7 @@ export async function completeReview(
       .onConflictDoUpdate({ target: reviews.reviewJobId, set: review })
       .returning();
     if (!storedReview) throw new Error('completeReview: review not stored');
+    await tx.delete(reviewFindings).where(eq(reviewFindings.reviewId, storedReview.id));
     const storedFindings =
       findings.length === 0
         ? []

@@ -4,6 +4,7 @@ import {
   createReviewJob,
   findInstallationByGithubId,
   getRepositorySettings,
+  IdempotencyConflictError,
   manualReviewKey,
   markInstallationRemoved,
   markRepositoriesRemoved,
@@ -124,6 +125,20 @@ describe('store', () => {
       expect(first.job.status).toBe('PENDING');
     });
 
+    it('rejects an idempotency key reused for a different commit', async () => {
+      const { repository } = await makeReviewJob(db, 'abc');
+      await expect(
+        createReviewJob(db, {
+          repositoryId: repository.id,
+          installationId: repository.installationId,
+          pullRequestNumber: 7,
+          headSha: 'def',
+          triggerType: 'automatic',
+          idempotencyKey: automaticReviewKey(repository.id, 7, 'abc'),
+        }),
+      ).rejects.toBeInstanceOf(IdempotencyConflictError);
+    });
+
     it('lets a manual re-review create a new job for the same commit', async () => {
       const { repository, job } = await makeReviewJob(db, 'abc');
       const manual = await createReviewJob(db, {
@@ -160,6 +175,29 @@ describe('store', () => {
       const [stored] = await db.select().from(reviewJobs).where(eq(reviewJobs.id, job.id));
       expect(stored).toMatchObject({ status: 'SUCCEEDED' });
       expect(stored!.completedAt).toBeInstanceOf(Date);
+    });
+
+    it('replaces findings instead of duplicating them when completion is retried', async () => {
+      const { job } = await makeReviewJob(db);
+      const finding = {
+        filename: 'a.ts',
+        severity: 'high' as const,
+        startLine: 1,
+        endLine: 2,
+        issue: 'bug',
+        fixType: 'warning' as const,
+      };
+      const input = {
+        reviewJobId: job.id,
+        jobStatus: 'SUCCEEDED' as const,
+        review: { provider: 'gemini', model: 'm', status: 'SUCCEEDED' as const },
+        findings: [finding, { ...finding, startLine: 5, endLine: 5 }],
+      };
+      const first = await completeReview(db, input);
+      const retry = await completeReview(db, input);
+      expect(retry.review.id).toBe(first.review.id);
+      expect(await db.select().from(reviews)).toHaveLength(1);
+      expect(await db.select().from(reviewFindings)).toHaveLength(2);
     });
 
     it('rolls back the review and findings when a finding is invalid', async () => {
