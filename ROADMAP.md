@@ -199,14 +199,16 @@ that here.)
       `sizeBytes` column) is dropped from the result rather than handed to
       the model, with a note explaining the exclusion.
 - [x] Context cache - `context/cache.ts`'s `ReviewContextCache` dedupes the
-      engine's own PR-head file fetches within one review. Also designed to
-      be shared with Phase 8's tool executor for cross-tool duplicate-call
-      prevention, but that reuse hasn't happened yet - the executor doesn't
-      exist yet, and when it's built, its "already fetched" dedup logic
-      needs its own tracking of what's actually been delivered *to the
-      model*, separate from this cache's fetch-content reuse (a changed
-      file's content the engine fetched for import extraction has never
-      been shown to the model, so it must never be refused as a duplicate).
+      engine's own PR-head file fetches within one review, and
+      `context/fetch-content.ts`'s `fetchCachedContent` (shared with Phase
+      8's tool executor) never caches a transient fetch error as "file
+      missing" - only a real 404 or a permanent per-file problem (binary,
+      too large, a directory). Phase 8's `AgentToolExecutor` now reuses this
+      same cache for its own GitHub-fetch dedup, but keeps a separate
+      `deliveredFiles` set for "already shown to the model": a changed
+      file's content the engine fetched here for import extraction has
+      never reached the model, so `get_file_content` must not refuse it as
+      a duplicate the first time the model actually asks for it.
 
 **Done when:** the engine can answer what a changed file depends on, what
 depends on it, and which files to inspect. Done - verified by 3 unit test
@@ -226,20 +228,79 @@ verified by integration tests only.
 **Goal:** make the reviewer agentic.
 
 **Tools:**
-- [ ] get_file_content
-- [ ] get_imports
-- [ ] get_dependents
-- [ ] submit_review
+- [x] get_file_content - reads the PR head commit, fenced with a
+      `<<<FILE`/`FILE>>>` delimiter (escaping any pre-existing occurrence of
+      that sequence in the file itself, the same trick `llm/prompt.ts` uses
+      for repo rules) so fetched content can never forge its own closing
+      delimiter and read as instructions instead of data.
+- [x] get_imports - re-extracts imports from the requested file's PR-head
+      content (same extractor/manifest logic as the context engine and the
+      indexer), not the stored graph, so it's accurate for a file the PR
+      itself just edited.
+- [x] get_dependents - reads the stored reverse dependency graph.
+- [x] submit_review - schema-validates against the existing
+      `modelReviewOutputSchema` (Phase 4), rejects a finding on a file
+      outside the PR's changed files, and returns the validated payload
+      (`ToolExecutionResult.output`) alongside `done: true`.
 
 **Tasks:**
-- [ ] Tool schemas
-- [ ] Tool executor
-- [ ] Argument validation
-- [ ] Repo scoping
-- [ ] Path validation
-- [ ] Duplicate-call prevention
-- [ ] Tool timeouts
-- [ ] Result size limits
+- [x] Tool schemas - `agent/tools.ts`'s `TOOL_DEFINITIONS`, provider-neutral
+      JSON Schema (reuses the DB's `SEVERITIES`/`FIX_TYPES` enums).
+- [x] Tool executor - `agent/executor.ts`'s `AgentToolExecutor`, one
+      instance per review, repo/commit-scoped by construction.
+- [x] Argument validation - zod per tool (`{path}` for three of the four,
+      `modelReviewOutputSchema` for `submit_review`); accepts either a
+      parsed object or a raw JSON string (some adapters hand tool arguments
+      over as text).
+- [x] Repo scoping - `repositoryId`/`ref`/`headSha` are fixed at
+      construction; the model only ever supplies a path.
+- [x] Path validation - `agent/path-validation.ts`: no absolute paths, no
+      `..` segment.
+- [x] Duplicate-call prevention - `deliveredFiles` (a get_file_content
+      repeat gets `ALREADY_FETCHED_MESSAGE`, only set once a fetch actually
+      completes, so a timed-out call can't poison a later retry) plus
+      `ReviewContextCache`-backed caching of `get_imports`/`get_dependents`
+      query results (AI_AGENT_SPEC.md §10's "cache identical graph
+      queries").
+- [x] Tool timeouts - each tool call races a configurable timer
+      (`toolTimeoutMs`, default 15s) and returns a "timed out, you may
+      retry" result rather than hanging. This only abandons the *wait*:
+      `GitHubClient` takes no `AbortSignal`, so the underlying HTTP request
+      itself isn't cancelled and its result is still cached if it later
+      succeeds.
+- [x] Result size limits - `maxToolResultBytes` (default 32 KiB). File
+      content is truncated *before* fencing, not after, so a result over the
+      limit still closes its `FILE>>>` delimiter rather than leaving the
+      model with an unclosed fence.
+
+A permanent per-file problem (binary, over the size limit, a directory -
+`GitHubFileError`) is reported once as "unavailable" with no retry
+suggestion and is cached, distinct from a transient error (network, rate
+limit), which is never cached and is reported as retryable
+(`context/fetch-content.ts`'s `fetchCachedContent`, shared with the context
+engine - a gap fixed here that also applied to Phase 7's `buildReviewContext`,
+which previously cached *any* fetch failure, including a transient one, as
+"file missing" for the rest of the review).
+
+ARCHITECTURE.md §14 also asks that a `submit_review` finding's line be "in
+a reviewable part of the diff." The executor is repo/commit-scoped, not
+diff-scoped - it has no patch context - so that check is deliberately left
+to `review/findings.ts`'s existing `placeFindings`, which already demotes
+an out-of-diff finding to summary-only downstream rather than rejecting it
+here and forcing a retry.
+
+**Done when:** the four tools work against a real review job's repo/commit
+and enforce the security boundaries above. Nothing calls
+`AgentToolExecutor` yet - wiring it into an actual tool-call loop is Phase
+9's job. Verified by 2 unit test files (path-validation, tools; 6 tests) and
+a dedicated integration test file (`tests/integration/agent-executor.test.ts`,
+16 tests against a real Postgres graph) covering: fenced content and repeat-
+fetch refusal, cache-vs-delivered independence, missing/invalid paths,
+import extraction from PR head, stored-graph dependents and their query
+caching, `submit_review` accept/off-path-reject/schema-reject, fence-safe
+truncation, transient-vs-permanent fetch errors, timeout without poisoning a
+retry, and JSON-string tool arguments. No live proof against a real repo for
+this phase - verified by integration tests only.
 
 ## Phase 9: Agent loop
 **Goal:** the model decides what context it needs.
