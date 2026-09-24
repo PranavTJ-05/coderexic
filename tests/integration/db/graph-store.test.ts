@@ -7,6 +7,7 @@ import {
   getForwardEdges,
   getReverseEdges,
   listIndexedFiles,
+  markRepositoryIndexed,
   replaceDependencyEdges,
   updateRepositoryIndexStatus,
   upsertIndexedFiles,
@@ -54,30 +55,41 @@ describe('graph store', () => {
       const [row] = await db.select().from(repositories).where(eq(repositories.id, repository.id));
       expect(row?.indexStatus).toBe('READY');
     });
+
+    it('records the indexed sha and timestamp when marked indexed', async () => {
+      const repository = await makeRepository(db);
+      expect(repository.indexedSha).toBeNull();
+
+      await markRepositoryIndexed(db, repository.id, SHA);
+
+      const [row] = await db.select().from(repositories).where(eq(repositories.id, repository.id));
+      expect(row).toMatchObject({ indexStatus: 'READY', indexedSha: SHA });
+      expect(row?.indexedAt).toBeInstanceOf(Date);
+    });
   });
 
   describe('indexed files', () => {
     it('upserts, lists, and deletes by path', async () => {
       const repository = await makeRepository(db);
       await upsertIndexedFiles(db, repository.id, [
-        { path: 'src/a.ts', sha: 'sha1', language: 'typescript' },
-        { path: 'src/b.ts', sha: 'sha2', language: 'typescript' },
+        { path: 'src/a.ts', sha: 'sha1', language: 'typescript', sizeBytes: 100 },
+        { path: 'src/b.ts', sha: 'sha2', language: 'typescript', sizeBytes: 200 },
       ]);
       let files = await listIndexedFiles(db, repository.id);
       expect(files).toEqual(
         expect.arrayContaining([
-          { path: 'src/a.ts', sha: 'sha1' },
-          { path: 'src/b.ts', sha: 'sha2' },
+          { path: 'src/a.ts', sha: 'sha1', language: 'typescript', sizeBytes: 100 },
+          { path: 'src/b.ts', sha: 'sha2', language: 'typescript', sizeBytes: 200 },
         ]),
       );
 
       // Re-upserting the same path updates its sha rather than duplicating the row.
       await upsertIndexedFiles(db, repository.id, [
-        { path: 'src/a.ts', sha: 'sha1-updated', language: 'typescript' },
+        { path: 'src/a.ts', sha: 'sha1-updated', language: 'typescript', sizeBytes: 150 },
       ]);
       files = await listIndexedFiles(db, repository.id);
       expect(files.filter((f) => f.path === 'src/a.ts')).toEqual([
-        { path: 'src/a.ts', sha: 'sha1-updated' },
+        { path: 'src/a.ts', sha: 'sha1-updated', language: 'typescript', sizeBytes: 150 },
       ]);
 
       await deleteIndexedFiles(db, repository.id, ['src/b.ts']);

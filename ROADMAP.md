@@ -157,20 +157,70 @@ loop.
 - [x] Unresolved imports
 - [x] External packages
 
-Proven live end-to-end against the real GitHub App and a real installed repository (`PranavTJ-05/throwaway-test-repo`) via `pnpm graph:index --repo owner/name`, in addition to 264 unit + integration tests (181 unit, 83 integration, including a real-Redis `createIndexWorker` round trip).
+Proven live end-to-end against the real GitHub App and the real installed
+repository (`PranavTJ-05/throwaway-test-repo`, a Next.js app) via
+`pnpm graph:index --repo owner/name`: 23 files seen, 7 supported source
+files parsed, correctly extracting a real `app/layout.tsx -> app/globals.css`
+import edge - in addition to 264 unit + integration tests (181 unit, 83
+integration, including a real-Redis `createIndexWorker` round trip). (An
+earlier run against the same repo before it had real source content only
+exercised the tree-fetch/persistence plumbing, not parsing - correcting
+that here.)
 
 ## Phase 7: Context engine
 **Goal:** give reviews relevant context.
-- [ ] Direct import retrieval
-- [ ] Dependent retrieval
-- [ ] Changed-file filtering
-- [ ] Context ranking
-- [ ] Context token budget
-- [ ] File size limits
-- [ ] Context cache
+- [x] Direct import retrieval - `buildReviewContext` re-extracts a PR's
+      changed files' imports from their *head* content (the stored graph
+      only reflects the indexed default branch, which doesn't see a PR's own
+      new/edited imports), reusing the indexer's own `extractorFor`,
+      `loadTsAliases`/`loadGoModule` manifest loading, and `allFiles` set.
+- [x] Dependent retrieval - direct dependents (and a related-tests split of
+      them, via a language-agnostic `isTestFile` heuristic) come from the
+      stored graph via batched `getReverseEdgesForPaths`, including for a
+      PR's *removed* paths, so a deletion's dependents still surface even
+      though the deleted file itself is excluded from the result. An
+      optional second hop (`depth >= 2`) adds one more level via
+      `getForwardEdgesForPaths`/`getReverseEdgesForPaths` on the tier-1/2/3
+      frontier; `depth` is clamped 1-5 but only ever does one extra hop, so
+      3-5 behave the same as 2.
+- [x] Changed-file filtering - changed, removed, and `ignoreGlobs`-matched
+      paths (reusing `diff-filter.ts`'s `matchesGlob`) are excluded from
+      every tier.
+- [x] Context ranking - `context/rank.ts`: four tiers (`direct_import` >
+      `direct_dependent` > `related_test` > `second_degree`), deduped to
+      each path's best tier, sorted by tier then path.
+- [x] Context token budget - `context/budget.ts`: `estimateTokens`,
+      `TokenBudget`, `truncateToTokens` (a chars/4 heuristic, deliberately
+      not a real tokenizer - see ARCHITECTURE.md §22 dependency-vetting
+      note in the file). Built and unit-tested, but not yet called from
+      `buildReviewContext` itself; its consumer is Phase 8/9's prompt
+      assembly, once there's an actual prompt payload to budget.
+- [x] File size limits - a related file over 256 KiB (from the indexed
+      `sizeBytes` column) is dropped from the result rather than handed to
+      the model, with a note explaining the exclusion.
+- [x] Context cache - `context/cache.ts`'s `ReviewContextCache` dedupes the
+      engine's own PR-head file fetches within one review. Also designed to
+      be shared with Phase 8's tool executor for cross-tool duplicate-call
+      prevention, but that reuse hasn't happened yet - the executor doesn't
+      exist yet, and when it's built, its "already fetched" dedup logic
+      needs its own tracking of what's actually been delivered *to the
+      model*, separate from this cache's fetch-content reuse (a changed
+      file's content the engine fetched for import extraction has never
+      been shown to the model, so it must never be refused as a duplicate).
 
 **Done when:** the engine can answer what a changed file depends on, what
-depends on it, and which files to inspect.
+depends on it, and which files to inspect. Done - verified by 3 unit test
+files (rank/budget/cache, 16 tests) and a dedicated integration test file
+(`tests/integration/context-engine.test.ts`, 7 tests against a real
+Postgres graph) covering: degraded/not-ready, tier classification, ignored
+paths (with a control run proving the exclusion came from the glob, not
+from the extractor failing to resolve), depth 1 vs 2, deleted-file
+dependents, size-limit exclusion, and `maxFiles` truncation. `buildReviewContext`
+is not yet called by `processReviewJob`; per the checklist above, Phase 7's
+scope is the engine itself; wiring it into a request the review pipeline
+actually assembles is Phase 8/9's job (the agent loop that decides what
+context it needs). No live proof against a real repo for this phase -
+verified by integration tests only.
 
 ## Phase 8: Agent tools
 **Goal:** make the reviewer agentic.

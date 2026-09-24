@@ -113,13 +113,32 @@ export async function updateRepositoryIndexStatus(
   await db.update(repositories).set({ indexStatus }).where(eq(repositories.id, repositoryId));
 }
 
+/** Marks a repository READY at the commit an index run just finished indexing. */
+export async function markRepositoryIndexed(
+  db: Executor,
+  repositoryId: string,
+  indexedSha: string,
+): Promise<void> {
+  await db
+    .update(repositories)
+    .set({ indexStatus: 'READY', indexedSha, indexedAt: new Date() })
+    .where(eq(repositories.id, repositoryId));
+}
+
 /** The current `(path, sha)` of everything indexed for a repo, to diff a new tree against. */
 export async function listIndexedFiles(
   db: Executor,
   repositoryId: string,
-): Promise<{ path: string; sha: string | null }[]> {
+): Promise<
+  { path: string; sha: string | null; language: string | null; sizeBytes: number | null }[]
+> {
   return db
-    .select({ path: indexedFiles.path, sha: indexedFiles.sha })
+    .select({
+      path: indexedFiles.path,
+      sha: indexedFiles.sha,
+      language: indexedFiles.language,
+      sizeBytes: indexedFiles.sizeBytes,
+    })
     .from(indexedFiles)
     .where(eq(indexedFiles.repositoryId, repositoryId));
 }
@@ -128,6 +147,8 @@ export interface UpsertedIndexedFile {
   path: string;
   sha: string;
   language: string | null;
+  /** From the git tree entry's `size`; lets the context engine budget candidates without fetching content. */
+  sizeBytes: number | null;
 }
 
 /** Inserts or refreshes indexed-file rows for the files an index run actually (re)parsed. */
@@ -146,13 +167,19 @@ export async function upsertIndexedFiles(
         path: f.path,
         sha: f.sha,
         language: f.language,
+        sizeBytes: f.sizeBytes,
         isSupported: true,
         lastIndexedAt: now,
       })),
     )
     .onConflictDoUpdate({
       target: [indexedFiles.repositoryId, indexedFiles.path],
-      set: { sha: sql`excluded.sha`, language: sql`excluded.language`, lastIndexedAt: now },
+      set: {
+        sha: sql`excluded.sha`,
+        language: sql`excluded.language`,
+        sizeBytes: sql`excluded.size_bytes`,
+        lastIndexedAt: now,
+      },
     });
 }
 
@@ -242,6 +269,42 @@ export async function getReverseEdges(
       and(
         eq(dependencyEdges.repositoryId, repositoryId),
         eq(dependencyEdges.targetPath, targetPath),
+      ),
+    );
+}
+
+/** Batched `getForwardEdges` for several source paths in one query (the context engine's changed-file set). */
+export async function getForwardEdgesForPaths(
+  db: Executor,
+  repositoryId: string,
+  sourcePaths: readonly string[],
+): Promise<DependencyEdge[]> {
+  if (sourcePaths.length === 0) return [];
+  return db
+    .select()
+    .from(dependencyEdges)
+    .where(
+      and(
+        eq(dependencyEdges.repositoryId, repositoryId),
+        inArray(dependencyEdges.sourcePath, [...sourcePaths]),
+      ),
+    );
+}
+
+/** Batched `getReverseEdges` for several target paths in one query. */
+export async function getReverseEdgesForPaths(
+  db: Executor,
+  repositoryId: string,
+  targetPaths: readonly string[],
+): Promise<DependencyEdge[]> {
+  if (targetPaths.length === 0) return [];
+  return db
+    .select()
+    .from(dependencyEdges)
+    .where(
+      and(
+        eq(dependencyEdges.repositoryId, repositoryId),
+        inArray(dependencyEdges.targetPath, [...targetPaths]),
       ),
     );
 }

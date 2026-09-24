@@ -1,7 +1,10 @@
 import {
+  createIndexQueue,
   createLogger,
   createReviewQueue,
   ignorePatterns,
+  indexRuns,
+  markRepositoryIndexed,
   ModelHttpError,
   reviewFindings,
   reviewJobs,
@@ -436,6 +439,43 @@ describe('worker: processReviewJob', () => {
     const [storedJob] = await db.select().from(reviewJobs).where(eq(reviewJobs.id, job.id));
     expect(storedJob).toMatchObject({ status: 'SUCCEEDED' });
   });
+
+  it('kicks off an index run for the PR base sha when the repository has never been indexed', async () => {
+    const { repository, job } = await makeReviewJob(db);
+    const client = fakeClient();
+    const deps = {
+      db,
+      githubApp: fakeGithubApp(client),
+      model: fakeModel(FINDING_OUTPUT),
+      provider: 'test',
+      modelName: 'm',
+      logger,
+    };
+
+    await processReviewJob(deps, job.id);
+
+    const runs = await db.select().from(indexRuns).where(eq(indexRuns.repositoryId, repository.id));
+    expect(runs).toMatchObject([{ commitSha: 'b'.repeat(40), status: 'PENDING' }]);
+  });
+
+  it('does not create another index run when the repository is already indexed at the PR base sha', async () => {
+    const { repository, job } = await makeReviewJob(db);
+    await markRepositoryIndexed(db, repository.id, 'b'.repeat(40));
+    const client = fakeClient();
+    const deps = {
+      db,
+      githubApp: fakeGithubApp(client),
+      model: fakeModel(FINDING_OUTPUT),
+      provider: 'test',
+      modelName: 'm',
+      logger,
+    };
+
+    await processReviewJob(deps, job.id);
+
+    const runs = await db.select().from(indexRuns).where(eq(indexRuns.repositoryId, repository.id));
+    expect(runs).toHaveLength(0);
+  });
 });
 
 describe('worker: createReviewWorker end to end', () => {
@@ -477,6 +517,47 @@ describe('worker: createReviewWorker end to end', () => {
       await worker.stop();
       await producer.obliterate({ force: true }).catch(() => undefined);
       await producer.close();
+    }
+  }, 15_000);
+
+  it('also enqueues the index run it created onto the real index queue', async () => {
+    const { repository, job } = await makeReviewJob(db);
+    const client = fakeClient();
+    const worker = createReviewWorker({
+      logger,
+      db,
+      connection: redis,
+      githubApp: fakeGithubApp(client),
+      model: fakeModel(FINDING_OUTPUT),
+      provider: 'test-provider',
+      modelName: 'test-model',
+      concurrency: 1,
+      sweepIntervalMs: 3_600_000,
+      staleAfterMs: 3_600_000,
+    });
+    const producer = createReviewQueue(redis);
+    const indexQueue = createIndexQueue(redis);
+
+    try {
+      await worker.start();
+      await producer.add('review', { reviewJobId: job.id }, { jobId: job.id });
+
+      const deadline = Date.now() + 10_000;
+      let runs: { id: string; status: string }[] = [];
+      while (Date.now() < deadline) {
+        runs = await db.select().from(indexRuns).where(eq(indexRuns.repositoryId, repository.id));
+        if (runs.length > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      expect(runs).toMatchObject([{ commitSha: 'b'.repeat(40) }]);
+      const queuedJob = await indexQueue.getJob(runs[0]!.id);
+      expect(queuedJob?.data).toMatchObject({ indexRunId: runs[0]!.id });
+    } finally {
+      await worker.stop();
+      await producer.obliterate({ force: true }).catch(() => undefined);
+      await producer.close();
+      await indexQueue.obliterate({ force: true }).catch(() => undefined);
+      await indexQueue.close();
     }
   }, 15_000);
 });

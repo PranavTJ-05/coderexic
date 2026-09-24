@@ -98,9 +98,15 @@ compiles core first, then apps against core's `dist/`.
   run for the same `(repositoryId, commitSha)` before inserting (no DB
   unique constraint enforces this), and a stale-run sweep re-enqueues
   PENDING rows that never reached Redis. Indexing is triggered from
-  `onPush` only - never from installation/repos-added events, since
-  resolving a default-branch commit sha there would need a GitHub API
-  call, which webhook handlers must never make. Per-language import
+  `onPush` - never from installation/repos-added events, since resolving a
+  default-branch commit sha there would need a GitHub API call, which
+  webhook handlers must never make. It's also self-healing:
+  `processReviewJob` (`apps/worker/src/review/pipeline.ts`) checks
+  `repository.indexedSha !== pr.baseSha` and, if so, fire-and-forget kicks
+  off an index run itself (`createIndexRun` + its normal dedup, enqueued
+  onto the same `index-runs` queue), so a repo nobody has pushed to since
+  install doesn't stay un-indexed forever. This never blocks or fails the
+  review - failures are logged and swallowed. Per-language import
   extraction is regex-based/heuristic except TypeScript/JavaScript, which
   uses the real `ts.preProcessFile` compiler API; every extractor only
   emits an edge for a path that actually exists in the indexed file set,
@@ -108,6 +114,23 @@ compiles core first, then apps against core's `dist/`.
   Indexing is incremental: `planIndex` diffs each file's current tree blob
   sha against the stored `indexed_files.sha`, and `replaceDependencyEdges`
   only touches the source paths re-parsed or removed in that run.
+- The context engine (`packages/core/src/context/`) answers what a
+  changed file imports, what depends on it, and which related tests exist
+  (`buildReviewContext`, AI_AGENT_SPEC.md §18's tiers). Imports for a PR's
+  changed files are re-extracted fresh from PR **head** content (the
+  stored graph only reflects the indexed default branch, which has no
+  entry for a PR's own new/edited imports); dependents - including for a
+  PR's removed/renamed-old paths - come from the stored graph via batched
+  `getForwardEdgesForPaths`/`getReverseEdgesForPaths`, never from
+  per-path queries. Nothing calls `buildReviewContext` from the review
+  pipeline yet; that wiring belongs to the agent loop (Phase 8/9), once
+  there's an actual request payload to put the related files into.
+  `ReviewContextCache` (`context/cache.ts`) is scoped to one review job
+  and shared by design with Phase 8's tool executor for duplicate-call
+  prevention - but its dedup key there must track what's actually been
+  **delivered to the model**, separate from the engine's own fetch-content
+  reuse; a changed file's content fetched here for import extraction has
+  never been shown to the model and must never be refused as a duplicate.
 
 ## Commands
 

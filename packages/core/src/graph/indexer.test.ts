@@ -125,7 +125,9 @@ describe('buildRepositoryIndex', () => {
       previouslyIndexed: [],
     });
     expect(result.edgesBySourcePath.size).toBe(0);
-    expect(result.indexedFiles).toEqual([{ path: 'src/a.ts', sha: 's1', language: 'typescript' }]);
+    expect(result.indexedFiles).toEqual([
+      { path: 'src/a.ts', sha: 's1', language: 'typescript', sizeBytes: 10 },
+    ]);
   });
 
   it('surfaces a truncated tree instead of silently under-indexing', async () => {
