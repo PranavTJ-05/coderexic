@@ -44,6 +44,45 @@ describe('createLogger', () => {
     });
   });
 
+  it('redacts secrets at any depth and inside arrays', () => {
+    const out = capture();
+    const logger = createLogger({ name: 't', destination: out.stream });
+    logger.info({
+      request: { body: { credentials: { apiKey: 'sk-deeply-nested', provider: 'gemini' } } },
+      keys: [{ ApiKey: 'sk-in-array-mixed-case' }],
+    });
+    const raw = out.lines.join('');
+    expect(raw).not.toContain('sk-deeply-nested');
+    expect(raw).not.toContain('sk-in-array-mixed-case');
+    expect(out.records()[0]).toMatchObject({
+      request: { body: { credentials: { apiKey: '[REDACTED]', provider: 'gemini' } } },
+    });
+  });
+
+  it('redacts secret keys in child logger bindings', () => {
+    const out = capture();
+    const logger = createLogger({ name: 't', destination: out.stream }).child({
+      token: 'child-top-secret',
+      github: { privateKey: 'child-nested-secret', appId: 42 },
+    });
+    logger.info('bound');
+    const raw = out.lines.join('');
+    expect(raw).not.toContain('child-top-secret');
+    expect(raw).not.toContain('child-nested-secret');
+    expect(out.records()[0]).toMatchObject({ github: { appId: 42 } });
+  });
+
+  it('handles circular objects and keeps errors serialized', () => {
+    const out = capture();
+    const logger = createLogger({ name: 't', destination: out.stream });
+    const loop: Record<string, unknown> = { token: 'loop-secret' };
+    loop.self = loop;
+    logger.error({ loop, err: new Error('boom') }, 'failed');
+    const record = out.records()[0];
+    expect(record).toMatchObject({ loop: { token: '[REDACTED]', self: '[Circular]' } });
+    expect(record?.err).toMatchObject({ message: 'boom', type: 'Error' });
+  });
+
   it('redacts credential and signature headers on requests', () => {
     const out = capture();
     const logger = createLogger({ name: 't', destination: out.stream });
