@@ -90,6 +90,24 @@ compiles core first, then apps against core's `dist/`.
   reading from head lets a PR edit its own review rules to silence findings
   about itself. A bad config field falls back to defaults for that field
   only and is reported in the posted review, never silently dropped.
+- The dependency graph (`packages/core/src/graph/`) has its own BullMQ
+  queue (`index-runs`, `apps/worker/src/index-run/`), separate from
+  `review-jobs`, so indexing and review work fail/retry independently. It
+  mirrors the review-job queue's exact idempotency shape: `jobId` is the
+  index run's id, `createIndexRun` checks for an existing PENDING/RUNNING
+  run for the same `(repositoryId, commitSha)` before inserting (no DB
+  unique constraint enforces this), and a stale-run sweep re-enqueues
+  PENDING rows that never reached Redis. Indexing is triggered from
+  `onPush` only - never from installation/repos-added events, since
+  resolving a default-branch commit sha there would need a GitHub API
+  call, which webhook handlers must never make. Per-language import
+  extraction is regex-based/heuristic except TypeScript/JavaScript, which
+  uses the real `ts.preProcessFile` compiler API; every extractor only
+  emits an edge for a path that actually exists in the indexed file set,
+  external packages/stdlib imports are dropped rather than stored.
+  Indexing is incremental: `planIndex` diffs each file's current tree blob
+  sha against the stored `indexed_files.sha`, and `replaceDependencyEdges`
+  only touches the source paths re-parsed or removed in that run.
 
 ## Commands
 

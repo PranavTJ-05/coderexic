@@ -1,9 +1,11 @@
 import {
+  enqueueIndexRun,
   enqueueReviewJob,
   markWebhookEvent,
   recordWebhookEvent,
   verifyWebhookSignature,
   type Database,
+  type IndexQueueJob,
   type ReviewQueueJob,
 } from '@coderexic/core';
 import type { Queue } from 'bullmq';
@@ -18,6 +20,8 @@ export interface WebhookRouteOptions {
   secret: string;
   /** Enqueues review jobs after their creating transaction commits. */
   reviewQueue: Queue<ReviewQueueJob>;
+  /** Enqueues index runs after their creating transaction commits. */
+  indexQueue: Queue<IndexQueueJob>;
 }
 
 function header(value: string | string[] | undefined): string | undefined {
@@ -32,7 +36,7 @@ function header(value: string | string[] | undefined): string | undefined {
  */
 export async function registerWebhookRoutes(
   app: FastifyInstance,
-  { db, secret, reviewQueue }: WebhookRouteOptions,
+  { db, secret, reviewQueue, indexQueue }: WebhookRouteOptions,
 ): Promise<void> {
   await app.register((scope, _options, done) => {
     // The signature covers the exact bytes GitHub sent, so keep the raw body.
@@ -106,6 +110,11 @@ export async function registerWebhookRoutes(
           // sweep re-enqueues it later.
           await enqueueReviewJob(reviewQueue, outcome.reviewJobId).catch((err: unknown) => {
             log.error({ err, reviewJobId: outcome.reviewJobId }, 'failed to enqueue review job');
+          });
+        }
+        if (outcome.indexRunId) {
+          await enqueueIndexRun(indexQueue, outcome.indexRunId).catch((err: unknown) => {
+            log.error({ err, indexRunId: outcome.indexRunId }, 'failed to enqueue index run');
           });
         }
         return { status: outcome.status.toLowerCase() };

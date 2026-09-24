@@ -130,32 +130,34 @@ loop.
 
 ## Phase 6: Dependency graph
 **Goal:** understand how the repo's files relate.
-- [ ] Repository tree crawler
-- [ ] Supported-extension detection
-- [ ] TypeScript/JavaScript parser
-- [ ] Python parser
-- [ ] Go parser
-- [ ] Rust parser
-- [ ] Java parser
-- [ ] Ruby parser
-- [ ] Local import resolver
-- [ ] Alias resolver
-- [ ] Forward graph
-- [ ] Reverse graph
-- [ ] DB persistence
-- [ ] Graph indexing
-- [ ] Incremental update
+- [x] Repository tree crawler - `buildRepositoryIndex` walks the recursive git tree via `GitHubClient.getRepositoryTree`, capped at `DEFAULT_MAX_FILES=3000` with a `truncated` flag surfaced rather than silently dropped
+- [x] Supported-extension detection - `graph/languages.ts`'s `LANGUAGE_BY_EXTENSION`/`isSupportedPath`; unsupported files are counted as seen but never fetched or parsed
+- [x] TypeScript/JavaScript parser - `ts.preProcessFile` (real TS compiler API, not a hand-rolled regex) captures ES imports, `export ... from`, dynamic `import()`, and CommonJS `require()` in one pass
+- [x] Python parser - regex-based; `import x.y`, `from x.y import a, b`, and relative `from .[.]* import a, b` (each imported name tried as a submodule)
+- [x] Go parser - regex-based; only imports under the repo's own `go.mod` module prefix are resolved (directory-suffix heuristic, marked `resolved: false`), everything else (stdlib/third-party) dropped
+- [x] Rust parser - regex-based; `mod foo;` declarations only, resolved via the `mod.rs`/`lib.rs`/`main.rs` filename convention
+- [x] Java parser - regex-based; resolves against `src/main/java|src/test/java|src`, static imports try both the full path and the member-stripped path, wildcard imports dropped
+- [x] Ruby parser - regex-based; `require_relative` (directory-relative) and `require` (lib/-rooted; external gems dropped)
+- [x] Local import resolver - `resolveAgainstFiles` (extension/index-file candidate matching against the real file set); every extractor only emits an edge for a file that actually exists in the tree
+- [x] Alias resolver - `graph/tsconfig.ts` parses `tsconfig.json` (via `ts.parseConfigFileTextToJson`, JSONC-tolerant) for `baseUrl`/`paths`; `extends` chains are an explicit known limitation (would require fetching an arbitrary chain of other repo files)
+- [x] Forward graph - `getForwardEdges`
+- [x] Reverse graph - `getReverseEdges`
+- [x] DB persistence - `dependency_edges`/`indexed_files`/`index_runs` (already existed from the Phase 2 migration; no new migration needed for Phase 6)
+- [x] Graph indexing - dedicated `index-runs` BullMQ queue + worker (mirrors the review-job queue's idempotency/claim/stale-sweep pattern exactly), triggered from `onPush` with zero extra GitHub calls since the commit sha is already in the webhook payload
+- [x] Incremental update - `planIndex` diffs each file's current tree blob `sha` against the stored `indexed_files.sha`; only new-or-changed files are re-fetched/re-parsed, and `replaceDependencyEdges` only touches the source paths that were actually re-parsed or removed in that run
 
 **Fixture repos covering:**
-- [ ] Direct imports
-- [ ] Indirect imports
-- [ ] Aliases
-- [ ] Index files
-- [ ] Renamed files
-- [ ] Deleted files
-- [ ] Circular dependencies
-- [ ] Unresolved imports
-- [ ] External packages
+- [x] Direct imports
+- [x] Indirect imports
+- [x] Aliases
+- [x] Index files
+- [x] Renamed files - falls out naturally as a remove (old path) + add (new path, different blob sha)
+- [x] Deleted files
+- [x] Circular dependencies
+- [x] Unresolved imports
+- [x] External packages
+
+Proven live end-to-end against the real GitHub App and a real installed repository (`PranavTJ-05/throwaway-test-repo`) via `pnpm graph:index --repo owner/name`, in addition to 264 unit + integration tests (181 unit, 83 integration, including a real-Redis `createIndexWorker` round trip).
 
 ## Phase 7: Context engine
 **Goal:** give reviews relevant context.

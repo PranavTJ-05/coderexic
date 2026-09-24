@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import {
+  createIndexQueue,
   createLogger,
   createReviewQueue,
+  indexRuns,
   installations,
   repositories,
   reviewJobs,
@@ -55,6 +57,7 @@ describe('POST /webhooks/github', () => {
   const { db } = database;
   const redis = useTestRedis();
   const reviewQueue = createReviewQueue(redis);
+  const indexQueue = createIndexQueue(redis);
   let app: Awaited<ReturnType<typeof buildServer>>;
 
   beforeAll(async () => {
@@ -63,12 +66,15 @@ describe('POST /webhooks/github', () => {
       database,
       webhookSecret: SECRET,
       reviewQueue,
+      indexQueue,
     });
   });
   afterAll(async () => {
     await app.close();
     await reviewQueue.obliterate({ force: true });
     await reviewQueue.close();
+    await indexQueue.obliterate({ force: true });
+    await indexQueue.close();
   });
 
   function deliver(
@@ -347,11 +353,25 @@ describe('POST /webhooks/github', () => {
       repository,
     });
 
-    it('a push to the default branch records the new head commit', async () => {
+    it('a push to the default branch records the new head commit and starts an index run', async () => {
       const res = await deliver('push', push('refs/heads/main'));
       expect(res.json()).toEqual({ status: 'processed' });
       const [repo] = await db.select().from(repositories);
       expect(repo!.headSha).toBe(sha('d'));
+
+      const [run] = await db.select().from(indexRuns).where(eq(indexRuns.repositoryId, repo!.id));
+      expect(run).toMatchObject({ commitSha: sha('d'), status: 'PENDING' });
+      const job = await indexQueue.getJob(run!.id);
+      expect(job?.data).toEqual({ indexRunId: run!.id });
+    });
+
+    it('a redelivered push for the same commit does not start a second index run', async () => {
+      const payload = push('refs/heads/main');
+      await deliver('push', payload);
+      await deliver('push', payload, { delivery: randomUUID() });
+      const [repo] = await db.select().from(repositories);
+      const runs = await db.select().from(indexRuns).where(eq(indexRuns.repositoryId, repo!.id));
+      expect(runs).toHaveLength(1);
     });
 
     it('pushes to other branches and branch deletions are ignored', async () => {

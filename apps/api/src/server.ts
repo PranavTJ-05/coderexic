@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { DatabaseHandle, Logger, ReviewQueueJob } from '@coderexic/core';
+import type { DatabaseHandle, IndexQueueJob, Logger, ReviewQueueJob } from '@coderexic/core';
 import type { Queue } from 'bullmq';
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
 import { registerHealthRoutes } from './routes/health.js';
@@ -8,10 +8,11 @@ import { registerWebhookRoutes } from './webhooks/route.js';
 export interface BuildServerOptions {
   logger: Logger;
   version?: string;
-  /** Enables the readiness check and, with `webhookSecret` and `reviewQueue`, the GitHub webhook route. */
+  /** Enables the readiness check and, with the other queue/secret options, the GitHub webhook route. */
   database?: DatabaseHandle;
   webhookSecret?: string;
   reviewQueue?: Queue<ReviewQueueJob>;
+  indexQueue?: Queue<IndexQueueJob>;
 }
 
 export async function buildServer({
@@ -20,6 +21,7 @@ export async function buildServer({
   database,
   webhookSecret,
   reviewQueue,
+  indexQueue,
 }: BuildServerOptions): Promise<FastifyInstance> {
   // Widen to Fastify's logger interface so routes see a plain FastifyInstance.
   const loggerInstance: FastifyBaseLogger = logger;
@@ -35,8 +37,13 @@ export async function buildServer({
   });
 
   registerHealthRoutes(app, version, database && (() => database.ping()));
-  if (database && webhookSecret && reviewQueue) {
-    await registerWebhookRoutes(app, { db: database.db, secret: webhookSecret, reviewQueue });
+  if (database && webhookSecret && reviewQueue && indexQueue) {
+    await registerWebhookRoutes(app, {
+      db: database.db,
+      secret: webhookSecret,
+      reviewQueue,
+      indexQueue,
+    });
   }
 
   return app;

@@ -1,5 +1,6 @@
 import {
   automaticReviewKey,
+  createIndexRun,
   createReviewJob,
   findInstallationByGithubId,
   findRepository,
@@ -34,6 +35,8 @@ export interface WebhookOutcome {
   reason?: string;
   /** Set when this event created or matched a review job, so the route can enqueue it. */
   reviewJobId?: string;
+  /** Set when this event started an index run, so the route can enqueue it. */
+  indexRunId?: string;
 }
 
 /** The payload passed signature checks but does not match the expected shape. */
@@ -221,11 +224,15 @@ async function onPush(ctx: WebhookContext, payload: unknown): Promise<WebhookOut
   if (!active) return ignored('installation or repository was removed');
   const { installation, repository } = active;
   await updateRepositoryHead(ctx.db, repository.id, event.after);
+  // Only the default branch reaches here (checked above), and its new commit is already
+  // known from the webhook payload, so this needs no GitHub API call to start indexing
+  // (webhook handlers only write to the database - see AGENTS.md's GitHub client rule).
+  const indexRun = await createIndexRun(ctx.db, repository.id, event.after);
   ctx.log.info(
-    { repository: repository.fullName, headSha: event.after },
-    'default branch head updated',
+    { repository: repository.fullName, headSha: event.after, indexRunId: indexRun.id },
+    'default branch head updated; index run started',
   );
-  return { status: 'PROCESSED', installationId: installation.id };
+  return { status: 'PROCESSED', installationId: installation.id, indexRunId: indexRun.id };
 }
 
 function onIssueComment(_ctx: WebhookContext, payload: unknown): Promise<WebhookOutcome> {
