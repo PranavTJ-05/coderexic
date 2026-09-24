@@ -44,28 +44,28 @@ agent → findings → GitHub comments, without ambiguity.
 
 ## Phase 2: Database
 **Goal:** persistent app state.
-- [ ] Migration system
-- [ ] users
-- [ ] installations
-- [ ] repositories
-- [ ] repository settings
-- [ ] dependency edges
-- [ ] indexed files
-- [ ] index runs
-- [ ] review jobs
-- [ ] reviews
-- [ ] findings
-- [ ] agent runs
-- [ ] tool calls
-- [ ] webhook events
-- [ ] audit events
+- [x] Migration system
+- [x] users
+- [x] installations
+- [x] repositories
+- [x] repository settings
+- [x] dependency edges
+- [x] indexed files
+- [x] index runs
+- [x] review jobs
+- [x] reviews
+- [x] findings
+- [x] agent runs
+- [x] tool calls
+- [x] webhook events
+- [x] audit events
 
 **Tests:**
-- [ ] CRUD
-- [ ] Foreign keys
-- [ ] Uniqueness
-- [ ] Cascading behaviour
-- [ ] Transaction behaviour
+- [x] CRUD
+- [x] Foreign keys
+- [x] Uniqueness
+- [x] Cascading behaviour
+- [x] Transaction behaviour
 
 ## Phase 3: GitHub App
 **Goal:** receive events from GitHub and act on them securely.

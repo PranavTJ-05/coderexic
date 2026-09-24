@@ -277,6 +277,54 @@ duplicate jobs.
 | metadata | JSONB, never containing secrets |
 | created_at | |
 
+## 3a. Decisions made while implementing (Phase 2)
+The schema lives in `packages/core/src/db/schema.ts`. Migrations are in
+`packages/core/drizzle/`.
+
+**Spec conflicts, resolved with the user:**
+- `agent_runs` belongs to `reviews` (`review_id`), as the table says. The
+  relationship diagram showed it under `review_jobs`.
+- **Status values:**
+
+  | Column | Values |
+  | --- | --- |
+  | `repositories.index_status` | `PENDING`, `INDEXING`, `READY`, `FAILED` |
+  | `index_runs.status` | `PENDING`, `RUNNING`, `SUCCEEDED`, `FAILED` |
+  | `review_jobs.status` | `PENDING`, `RUNNING`, `SUCCEEDED`, `FAILED`, `TIMED_OUT`, `CANCELLED` |
+  | `agent_runs.termination_reason` | the full AI_AGENT_SPEC §14 list |
+
+- `review_jobs.idempotency_key` (UNIQUE) replaces the unique constraint on
+  (repo, PR, head, trigger), so a manual re-review can add a new job for the
+  same commit:
+  - automatic jobs use the key `automatic:<repo id>:<PR>:<head sha>`
+  - manual jobs use `manual:<delivery id>`
+- `trigger_type` is `automatic` or `manual`.
+- `repository_rules`, `ignore_patterns` and `model_credentials` were built
+  now, ahead of Phases 5 and 11.
+
+**Additions to the spec:**
+- `repositories.removed_at` allows soft removal, the same way installations
+  are removed, so review history survives a deselected repo.
+- Named status sets:
+  - `reviews.status`
+  - `agent_runs.status`: `RUNNING`, `SUCCEEDED`, `FAILED`, `TIMED_OUT`
+  - `agent_tool_calls.status`: `SUCCEEDED`, `FAILED`, `REJECTED`
+  - `webhook_events.delivery_status`: `RECEIVED`, `PROCESSED`, `IGNORED`,
+    `FAILED`
+- CHECK constraints enforce every status set, plus:
+  - positive agent limits
+  - `pull_request_number > 0`
+  - `confidence` between 0 and 1
+- `dependency_edges` has no separate (repo, source) index, because its
+  primary key already begins with those columns.
+
+**`ON DELETE` rules:**
+- **Cascade:** the rows under a repository, and everything under a review job.
+- **Set null:** `installations.created_by_user_id`,
+  `webhook_events.installation_id`, `audit_events.user_id` and
+  `audit_events.repository_id`.
+- **Cascade from the user:** `model_credentials`.
+
 ## 4. Retention
 | Data | Kept for |
 | --- | --- |

@@ -7,9 +7,8 @@ consults a dependency graph of the repository (what the changed files
 import and what depends on them), lets an AI agent fetch the related code
 it needs, and posts validated findings as inline review comments.
 
-> **Status:** Phase 1 (repository foundation). The API and worker start,
-> validate configuration and serve health checks; review features arrive in
-> later phases. See [ROADMAP.md](ROADMAP.md).
+> **Status:** Phase 2 (database). Schema, migrations and data access are in
+> place; review features arrive in later phases. See [ROADMAP.md](ROADMAP.md).
 
 ## Requirements
 
@@ -24,6 +23,7 @@ pnpm install
 cp .env.example .env              # adjust ports if 5432/6379/3000 are taken
 
 docker compose up -d postgres redis
+pnpm db:migrate
 pnpm dev:api                      # http://127.0.0.1:3000/health
 pnpm dev:worker
 ```
@@ -41,7 +41,10 @@ curl http://127.0.0.1:3000/health
 | ------------------- | --------------------------------------------- |
 | `pnpm lint`         | ESLint (type-aware) across the workspace      |
 | `pnpm typecheck`    | `tsc --noEmit` per package; no build needed   |
-| `pnpm test`         | Vitest                                        |
+| `pnpm test`         | Unit tests (Vitest, no services needed)       |
+| `pnpm test:integration` | Postgres-backed tests (throwaway database) |
+| `pnpm db:generate`  | Generate a SQL migration from the schema      |
+| `pnpm db:migrate`   | Apply pending migrations                      |
 | `pnpm build`        | Compile core, then apps, to `dist/`           |
 | `pnpm format`       | Prettier write (`format:check` in CI)         |
 

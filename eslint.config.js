@@ -12,7 +12,7 @@ export default tseslint.config(
       globals: globals.node,
       parserOptions: {
         projectService: {
-          allowDefaultProject: ['*.js', '*.ts'],
+          allowDefaultProject: ['*.js', '*.ts', 'packages/core/drizzle.config.ts'],
         },
         tsconfigRootDir: import.meta.dirname,
       },
