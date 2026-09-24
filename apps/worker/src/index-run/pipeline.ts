@@ -6,6 +6,7 @@ import {
   findInstallationById,
   findRepositoryById,
   listIndexedFiles,
+  markRepositoryIndexed,
   replaceDependencyEdges,
   updateRepositoryIndexStatus,
   upsertIndexedFiles,
@@ -98,7 +99,7 @@ export async function processIndexRun(deps: IndexPipelineDeps, indexRunId: strin
       edgesCreated: result.edgesCreated,
       durationMs: Date.now() - startedAt,
     });
-    await updateRepositoryIndexStatus(db, repository.id, 'READY');
+    await markRepositoryIndexed(db, repository.id, claimed.commitSha);
     if (result.truncated) {
       log.warn('GitHub truncated the repository tree; this index may be incomplete');
     }

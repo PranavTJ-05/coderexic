@@ -1,10 +1,12 @@
 import {
+  createIndexQueue,
   createReviewQueue,
   createReviewQueueWorker,
   enqueueReviewJob,
   findStalePendingReviewJobs,
   type Database,
   type GitHubApp,
+  type IndexQueueJob,
   type Logger,
   type ReviewModel,
   type ReviewQueueJob,
@@ -46,6 +48,7 @@ const DEFAULT_STALE_AFTER_MS = 5 * 60_000;
 export function createReviewWorker(deps: ReviewWorkerDeps): Worker {
   let running = false;
   let queue: Queue<ReviewQueueJob> | undefined;
+  let indexQueue: Queue<IndexQueueJob> | undefined;
   let consumer: BullWorker<ReviewQueueJob> | undefined;
   let sweepInterval: NodeJS.Timeout | undefined;
 
@@ -65,6 +68,7 @@ export function createReviewWorker(deps: ReviewWorkerDeps): Worker {
       if (running) return;
       running = true;
       queue = createReviewQueue(deps.connection);
+      indexQueue = createIndexQueue(deps.connection);
       consumer = createReviewQueueWorker(
         deps.connection,
         (job) =>
@@ -76,6 +80,7 @@ export function createReviewWorker(deps: ReviewWorkerDeps): Worker {
               provider: deps.provider,
               modelName: deps.modelName,
               logger: deps.logger,
+              ...(indexQueue !== undefined && { indexQueue }),
             },
             job.reviewJobId,
           ),
@@ -101,8 +106,10 @@ export function createReviewWorker(deps: ReviewWorkerDeps): Worker {
       sweepInterval = undefined;
       await consumer?.close();
       await queue?.close();
+      await indexQueue?.close();
       consumer = undefined;
       queue = undefined;
+      indexQueue = undefined;
       deps.logger.info('worker stopped');
     },
   };

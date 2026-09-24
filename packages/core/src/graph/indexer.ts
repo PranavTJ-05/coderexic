@@ -50,6 +50,7 @@ export interface IndexedFileResult {
   path: string;
   sha: string;
   language: string | null;
+  sizeBytes: number | null;
 }
 
 export interface BuildIndexOptions {
@@ -74,7 +75,8 @@ export interface BuildIndexResult {
   truncated: boolean;
 }
 
-async function loadTsAliases(
+/** Exported for the context engine, which parses a PR's changed files the same way. */
+export async function loadTsAliases(
   client: GitHubClient,
   ref: RepoRef,
   commitSha: string,
@@ -85,7 +87,8 @@ async function loadTsAliases(
   return text ? parseTsConfigAliases(text) : EMPTY_TS_ALIASES;
 }
 
-async function loadGoModule(
+/** Exported for the context engine, which parses a PR's changed files the same way. */
+export async function loadGoModule(
   client: GitHubClient,
   ref: RepoRef,
   commitSha: string,
@@ -130,7 +133,12 @@ export async function buildRepositoryIndex(options: BuildIndexOptions): Promise<
         const content = await client
           .getFileContent(ref, entry.path, commitSha, MAX_FILE_BYTES)
           .catch(() => null);
-        indexedFiles.push({ path: entry.path, sha: entry.sha, language });
+        indexedFiles.push({
+          path: entry.path,
+          sha: entry.sha,
+          language,
+          sizeBytes: entry.size,
+        });
         if (content === null || !extractor) return;
         const edges = extractor(content, {
           filePath: entry.path,

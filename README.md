@@ -7,14 +7,19 @@ consults a dependency graph of the repository (what the changed files
 import and what depends on them), lets an AI agent fetch the related code
 it needs, and posts validated findings as inline review comments.
 
-> **Status:** Phase 6 (dependency graph). Opening a pull request queues a
+> **Status:** Phase 7 (context engine). Opening a pull request queues a
 > review job; the worker asks Gemini for findings on the diff and posts
 > them as an inline GitHub review, shaped by each repo's own
 > `.coderexic.yml`/`.verix.yml` and rules file (loaded from the PR's base
 > commit). A push now also queues an incremental dependency-graph index
 > (TypeScript/JavaScript/Python/Go/Rust/Java/Ruby import resolution,
-> forward and reverse edges), though the review pipeline doesn't consume
-> it yet - that's the context engine (Phase 7). See
+> forward and reverse edges); if a review's repository isn't indexed at the
+> PR's base commit yet, the review pipeline kicks off an index run itself
+> rather than waiting for the next push. `buildReviewContext`
+> (`packages/core/src/context`) can now answer what a changed file imports,
+> what depends on it, and which related test files exist, ranked into
+> tiers and capped by file size/count - but nothing calls it yet; wiring
+> it into an actual request payload is the agent loop (Phase 8/9). See
 > [ROADMAP.md](ROADMAP.md).
 
 ## Requirements
@@ -66,7 +71,7 @@ apps/worker     Consumes review jobs and index runs from Redis; calls the
                 LLM and publishes GitHub reviews; builds the dependency
                 graph
 packages/core   Shared code: env, logging, db, github, queue, llm, review,
-                config, graph (later: agent)
+                config, graph, context (later: agent)
 ```
 
 ## Documentation

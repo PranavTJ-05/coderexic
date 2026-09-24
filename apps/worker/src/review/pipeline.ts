@@ -3,8 +3,10 @@ import {
   cancelReviewJob,
   claimReviewJob,
   completeReview,
+  createIndexRun,
   DEFAULT_DIFF_BUDGET,
   dedupeFindings,
+  enqueueIndexRun,
   failReviewJob,
   filterBySeverity,
   filterIgnoredPaths,
@@ -23,9 +25,11 @@ import {
   type Database,
   type DiffBudget,
   type GitHubApp,
+  type IndexQueueJob,
   type Logger,
   type ReviewModel,
 } from '@coderexic/core';
+import type { Queue } from 'bullmq';
 import { publishReview } from './publish.js';
 
 export interface ReviewPipelineDeps {
@@ -37,6 +41,37 @@ export interface ReviewPipelineDeps {
   modelName: string;
   logger: Logger;
   diffBudget?: DiffBudget;
+  /**
+   * Lets a review that finds its repo un-indexed at the PR's base sha kick
+   * off an index run itself. Indexing normally only starts from a push
+   * webhook (ARCHITECTURE.md §9), so a repo nobody has pushed to since
+   * install would otherwise stay un-indexed forever. Optional so tests that
+   * don't care about the graph can omit it; failures here are logged and
+   * never fail the review.
+   */
+  indexQueue?: Queue<IndexQueueJob>;
+}
+
+/**
+ * Ensures an index run exists for the PR's base sha when the repository
+ * isn't already indexed there, so the context engine (Phase 7+) has
+ * something to work with even for a repo nobody has pushed to since
+ * install. Fire-and-forget: never blocks or fails the review.
+ */
+async function ensureIndexed(
+  deps: ReviewPipelineDeps,
+  repositoryId: string,
+  baseSha: string,
+  log: Logger,
+): Promise<void> {
+  try {
+    const run = await createIndexRun(deps.db, repositoryId, baseSha);
+    if (deps.indexQueue) {
+      await enqueueIndexRun(deps.indexQueue, run.id);
+    }
+  } catch (err) {
+    log.warn({ err }, 'failed to trigger an index run for this repository; continuing the review');
+  }
 }
 
 /** Non-error termination reasons stored as review_jobs.error_code. */
@@ -99,6 +134,10 @@ export async function processReviewJob(
     if (pr.state !== 'open') {
       await cancelReviewJob(db, reviewJobId, SKIP_REASON.closed);
       return;
+    }
+
+    if (repository.indexedSha !== pr.baseSha) {
+      void ensureIndexed(deps, repository.id, pr.baseSha, log);
     }
 
     const reviewBodies = await client.listReviewBodies(ref, pr.number);

@@ -64,7 +64,7 @@ describe('worker: processIndexRun', () => {
       edgesCreated: 1,
     });
     const [repo] = await db.select().from(repositories).where(eq(repositories.id, repository.id));
-    expect(repo?.indexStatus).toBe('READY');
+    expect(repo).toMatchObject({ indexStatus: 'READY', indexedSha: 'a'.repeat(40) });
 
     const files = await db
       .select()
