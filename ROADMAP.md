@@ -26,12 +26,12 @@ Turn the idea into an executable engineering specification.
 
 ### Tasks
 
--   [ ] Product specification
--   [ ] Architecture
--   [ ] Data model
--   [ ] Agent specification
--   [ ] Roadmap
--   [ ] AGENTS.md
+-   [x] Product specification
+-   [x] Architecture
+-   [x] Data model
+-   [x] Agent specification
+-   [x] Roadmap
+-   [x] AGENTS.md
 -   [ ] threat model
 -   [ ] initial evaluation strategy
 
@@ -60,20 +60,20 @@ Create a clean production-oriented TypeScript repository.
 
 ### Tasks
 
--   [ ] pnpm setup
--   [ ] TypeScript strict mode
--   [ ] workspace structure
--   [ ] linting
--   [ ] formatting
--   [ ] Vitest
--   [ ] environment validation
--   [ ] Docker
--   [ ] PostgreSQL
--   [ ] health endpoint
--   [ ] structured logging
--   [ ] CI
--   [ ] README
--   [ ] AGENTS.md
+-   [x] pnpm setup
+-   [x] TypeScript strict mode
+-   [x] workspace structure
+-   [x] linting
+-   [x] formatting
+-   [x] Vitest
+-   [x] environment validation
+-   [x] Docker
+-   [x] PostgreSQL
+-   [x] health endpoint
+-   [x] structured logging
+-   [x] CI
+-   [x] README
+-   [x] AGENTS.md
 
 ### Definition of done
 
