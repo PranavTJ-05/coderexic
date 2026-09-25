@@ -8,4 +8,5 @@ export * from './groq.js';
 export * from './anthropic.js';
 export * from './one-shot-from-agent.js';
 export * from './provider-factory.js';
+export * from './credential-resolution.js';
 export * from './env.js';

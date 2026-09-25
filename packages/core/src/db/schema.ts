@@ -23,6 +23,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
@@ -212,7 +213,29 @@ export const modelCredentials = pgTable(
     updatedAt: updatedAt(),
     deletedAt: timestamptz('deleted_at'),
   },
-  (t) => [index('model_credentials_user_idx').on(t.userId)],
+  (t) => [
+    index('model_credentials_user_idx').on(t.userId),
+    // One live credential per (user, repository, provider): repositoryId is
+    // nullable for a user-level (non-repo-scoped) credential, so this needs
+    // NULLS NOT DISTINCT (drizzle-kit's `uniqueIndex` builder has no method
+    // for that yet - hand-added to the generated migration SQL instead; see
+    // the migration file's comment). Scoped to `deleted_at is null` so a
+    // soft-deleted row (replace/delete both soft-delete) never blocks a
+    // fresh credential for the same tuple.
+    uniqueIndex('model_credentials_live_unique_idx')
+      .on(t.userId, t.repositoryId, t.provider)
+      .where(sql`${t.deletedAt} is null`),
+    // A repo-scoped credential (repository_id set) is shared by the whole
+    // repo regardless of which user added it, so it needs its own
+    // exclusivity: without this, two different users could each hold a
+    // live repo-scoped credential for the same (repository, provider), and
+    // which one resolveDecryptedCredential's repo-tier lookup returns would
+    // be arbitrary. No NULLS NOT DISTINCT needed here - the WHERE clause
+    // already excludes every null repository_id.
+    uniqueIndex('model_credentials_live_repo_unique_idx')
+      .on(t.repositoryId, t.provider)
+      .where(sql`${t.repositoryId} is not null and ${t.deletedAt} is null`),
+  ],
 );
 
 /** Primary key (repository, source, target) also serves get_imports lookups. */

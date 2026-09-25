@@ -150,3 +150,26 @@ export async function checkProviderHealth(
     return { provider, ok: false, error: err instanceof Error ? err.message : 'unknown error' };
   }
 }
+
+export interface CredentialValidation {
+  valid: boolean;
+  /** Set only when `valid` is false - never includes the key itself. */
+  reason?: string;
+}
+
+/**
+ * BYOK key validation: the same no-token models-list call `checkProviderHealth`
+ * makes, reused so a submitted key can be rejected before it's ever stored.
+ * `credential.model` is irrelevant to this check (the call never reaches a
+ * model-specific endpoint), so callers may pass any non-empty placeholder.
+ */
+export async function validateModelCredential(
+  provider: SupportedModelProvider,
+  apiKey: string,
+  fetchImpl?: typeof globalThis.fetch,
+): Promise<CredentialValidation> {
+  const health = await checkProviderHealth(provider, { apiKey, model: '' }, fetchImpl);
+  return health.ok
+    ? { valid: true }
+    : { valid: false, ...(health.error && { reason: health.error }) };
+}

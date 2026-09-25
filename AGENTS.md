@@ -248,9 +248,38 @@ compiles core first, then apps against core's `dist/`.
   `agentAdapter` silently enable agent mode regardless of the flag.
 - `checkProviderHealth` (`llm/provider-factory.ts`) is a single no-token
   models-list `GET` per provider, run once at worker startup for the
-  selected default (logs a warning on failure, never crashes startup) and
-  reused as-is for Phase 11's "provider-specific credential validation" -
-  a 401/403 there means the key itself is bad, not a transient outage.
+  selected default (logs a warning on failure, never crashes startup), and
+  `validateModelCredential` reuses it for BYOK key validation - a 401/403
+  there means the key itself is bad, not a transient outage.
+- BYOK (`packages/core/src/crypto/`, `db/store/model-credentials.ts`) is
+  DB-and-crypto-layer only this phase - no API endpoint, since there's no
+  web app or auth flow yet to expose it through; exercised directly by
+  tests. `encryptCredential`/`decryptCredential`
+  (`crypto/credential-crypto.ts`) are AES-256-GCM with a random 12-byte IV
+  per call and the ciphertext bound to its row via AAD
+  (`user_id|repository_id|provider`), so a ciphertext copied into a
+  different row fails to decrypt instead of silently decrypting wrong.
+  Master keys are a version -> 32-byte-key map from
+  `MODEL_CREDENTIALS_MASTER_KEYS` (never the DB), validated at load time
+  (`crypto/env.ts`'s `loadModelCredentialsConfig`, which also confirms the
+  configured `MODEL_CREDENTIALS_KEY_VERSION` actually has a key). Only
+  `db/store/model-credentials.ts`'s `resolveDecryptedCredential` ever
+  returns plaintext - every CRUD function returns `ModelCredentialMetadata`
+  (no `encryptedSecret` field), and `encryptedSecret`/`plaintext`/`masterKey`
+  are in the logger's `SECRET_KEYS` so they're redacted at any object depth.
+  `model_credentials` has two partial unique indexes: one keyed on
+  `(user_id, repository_id, provider)` with `NULLS NOT DISTINCT` (hand-added
+  to the generated migration SQL - drizzle-kit's `uniqueIndex` builder has
+  no API for it) for user-scoped credentials, and one keyed on
+  `(repository_id, provider) WHERE repository_id IS NOT NULL` for
+  repo-scoped ones - a repo credential is shared by the whole repo
+  regardless of which user added it, so its exclusivity can't be keyed on
+  `user_id`. `llm/credential-resolution.ts`'s `resolveProviderEntry`
+  composes the DB's repo/user tiers with the system tier
+  (`buildProviderRegistry`) into one `ProviderEntry`; it is not wired into
+  `apps/worker/src/review/pipeline.ts` - a review job has no
+  session-derived user, so using the PR author's key would bill whoever
+  opened the PR, including fork contributors.
 
 ## Commands
 

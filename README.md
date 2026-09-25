@@ -7,7 +7,7 @@ consults a dependency graph of the repository (what the changed files
 import and what depends on them), lets an AI agent fetch the related code
 it needs, and posts validated findings as inline review comments.
 
-> **Status:** Phase 10 (multi-provider models). Opening a pull request
+> **Status:** Phase 11 (BYOK - DB and crypto layer). Opening a pull request
 > queues a review job. `MODEL_PROVIDER` picks which of Gemini, OpenAI,
 > Anthropic or Groq actually runs it (only that provider's API key needs to
 > be set); a repo's own `.coderexic.yml` can pick a different *configured*
@@ -24,7 +24,13 @@ it needs, and posts validated findings as inline review comments.
 > (TypeScript/JavaScript/Python/Go/Rust/Java/Ruby import resolution,
 > forward and reverse edges); if a review's repository isn't indexed at the
 > PR's base commit yet, the review pipeline kicks off an index run itself
-> rather than waiting for the next push. See [ROADMAP.md](ROADMAP.md).
+> rather than waiting for the next push. Users can also bring their own
+> provider API key: `model_credentials` stores it AES-256-GCM-encrypted
+> (`packages/core/src/crypto/`), with per-tuple uniqueness, versioned master
+> keys, rotation and soft deletion, and a `repo > user > system` resolution
+> function - but this phase is DB and crypto only, exercised through direct
+> store calls and tests, since there's no web app or auth yet to expose it
+> through. See [ROADMAP.md](ROADMAP.md).
 
 ## Requirements
 

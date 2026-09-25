@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createLogger } from '../logger.js';
-import { buildProviderRegistry, checkProviderHealth } from './provider-factory.js';
+import {
+  buildProviderRegistry,
+  checkProviderHealth,
+  validateModelCredential,
+} from './provider-factory.js';
 
 const logger = createLogger({ name: 'provider-factory-test', level: 'silent' });
 
@@ -62,5 +66,32 @@ describe('checkProviderHealth', () => {
     const fetch = vi.fn<typeof globalThis.fetch>().mockRejectedValue(new Error('ECONNREFUSED'));
     const result = await checkProviderHealth('anthropic', { apiKey: 'k', model: 'm' }, fetch);
     expect(result).toEqual({ provider: 'anthropic', ok: false, error: 'ECONNREFUSED' });
+  });
+});
+
+describe('validateModelCredential', () => {
+  it('reports a working key as valid', async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValue(new Response('{}', { status: 200 }));
+    const result = await validateModelCredential('groq', 'gsk-good', fetch);
+    expect(result).toEqual({ valid: true });
+  });
+
+  it('reports a 401 as invalid, without including the key', async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValue(new Response('{"error":"invalid"}', { status: 401 }));
+    const result = await validateModelCredential('openai', 'sk-bad', fetch);
+    expect(result.valid).toBe(false);
+    expect(result.reason).toBe('status 401');
+    expect(JSON.stringify(result)).not.toContain('sk-bad');
+  });
+
+  it('reports a network failure as invalid rather than throwing', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockRejectedValue(new Error('ECONNREFUSED'));
+    const result = await validateModelCredential('anthropic', 'k', fetch);
+    expect(result.valid).toBe(false);
+    expect(result.reason).toBe('ECONNREFUSED');
   });
 });

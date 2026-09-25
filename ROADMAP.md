@@ -568,18 +568,82 @@ API and the real installed throwaway repo:
 
 ## Phase 11: BYOK
 **Goal:** users can bring their own model credentials.
-- [ ] Encrypted credential storage
-- [ ] Key versioning
-- [ ] Key validation
-- [ ] Key rotation
-- [ ] Key deletion
-- [ ] No-secret logging
-- [ ] Provider-specific credential validation
+
+Scoped to the DB + crypto layer only, per an explicit product decision: no
+API endpoint exists yet (Phase 13's web app, with real auth, hasn't been
+built), so this phase builds and fully tests the storage, crypto, and
+resolution logic through direct store calls and unit/integration tests, not
+through any HTTP surface.
+
+- [x] Encrypted credential storage - `packages/core/src/crypto/credential-crypto.ts`
+      (`encryptCredential`/`decryptCredential`, AES-256-GCM, random 12-byte IV,
+      AAD binding to `user_id|repository_id|provider` so a ciphertext copied
+      into another row fails to decrypt). Stored via
+      `db/store/model-credentials.ts`'s `createModelCredential`/`replaceModelCredential`
+      into `model_credentials.encrypted_secret`. Master keys come from
+      `MODEL_CREDENTIALS_MASTER_KEYS` (`crypto/env.ts`), never the DB, and are
+      validated to be exactly 32 bytes at load time.
+- [x] Key versioning - `model_credentials.key_version` records which master-key
+      version encrypted a row; `crypto/master-key.ts`'s `parseMasterKeyMap`
+      supports multiple concurrent versions.
+- [x] Key validation - `llm/provider-factory.ts`'s `validateModelCredential`
+      (a no-token models-list call, reusing Phase 10's `checkProviderHealth`).
+      Live-verified against a real Groq key (valid) and a garbage key (401 ->
+      invalid); not live-verified for OpenAI/Anthropic/Gemini (no keys
+      available this phase, same limitation as Phase 10).
+- [x] Key rotation - `db/store/model-credentials.ts`'s `rotateModelCredential`
+      (decrypts under the row's current version, re-encrypts under a new one,
+      updates in place).
+- [x] Key deletion - `deleteModelCredential`; both "replace" and "delete" are
+      soft deletes (`deleted_at`), matching DATA_MODEL.md.
+- [x] No-secret logging - `encryptedSecret`/`encrypted_secret`, `plaintext`,
+      `masterKey`/`master_key` added to the logger's `SECRET_KEYS`
+      (`packages/core/src/logger.ts`), redacted by key name at any object
+      depth. `ResolvedCredential`'s `apiKey` field was already covered by the
+      existing `apiKey` entry.
+- [x] Provider-specific credential validation - same as "Key validation" above.
+
+Uniqueness: `model_credentials` has two partial unique indexes (migration
+`0001`/`0002`) - `(user_id, repository_id, provider) NULLS NOT DISTINCT WHERE
+deleted_at IS NULL` for user-scoped credentials, and `(repository_id,
+provider) WHERE repository_id IS NOT NULL AND deleted_at IS NULL` for
+repo-scoped ones (a repo credential is shared by the whole repo regardless of
+which user added it, so it needs its own exclusivity independent of
+`user_id`). Drizzle-kit's `uniqueIndex` builder has no `NULLS NOT DISTINCT`
+API, so the `0001` migration's SQL was hand-edited after generation; `0002`
+(the second index) needed no hand-editing.
+
+`llm/credential-resolution.ts`'s `resolveProviderEntry` composes the full
+repo > user > system precedence into a single usable `ProviderEntry`: the two
+DB tiers come from `db/store/model-credentials.ts`'s
+`resolveDecryptedCredential` (the only function in the codebase that returns
+plaintext), and the system tier is whatever this deployment already has
+configured for that provider via Phase 10's `buildProviderRegistry`. This is
+exercised directly by tests only - it is **not** wired into
+`apps/worker/src/review/pipeline.ts`. A review job has no session-derived
+user (no auth flow exists yet), so using the PR author's key would
+incorrectly bill whoever opened the PR, including fork contributors. Wiring
+even the repo tier into the pipeline is left to whichever phase adds a real
+per-repo BYOK setting with its own authorization story.
 
 **Audit:**
-- [ ] Plaintext never stored
-- [ ] Plaintext never returned
-- [ ] Plaintext never logged
+- [x] Plaintext never stored - `encryptCredential`'s output never contains the
+      input plaintext (tested); the DB row only ever holds `encrypted_secret`.
+- [x] Plaintext never returned - every CRUD function in
+      `db/store/model-credentials.ts` returns `ModelCredentialMetadata` (no
+      `encryptedSecret` field); only `resolveDecryptedCredential` returns
+      plaintext, and it's documented as the sole exception.
+- [x] Plaintext never logged - see "No-secret logging" above; tested end to
+      end (`tests/integration/db/model-credentials.test.ts`) by resolving a
+      real credential, logging the resolved object through the shared logger
+      config, and asserting the plaintext never reaches the log sink while a
+      positive control confirms the sink did capture the log line.
+
+**Done when:** `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test`
+(305 tests), `pnpm test:integration` (136 tests, including 19 new tests in
+`tests/integration/db/model-credentials.test.ts`), and `pnpm build` all pass.
+New unit tests: 13 in `crypto/credential-crypto.test.ts`, 5 in
+`crypto/env.test.ts`, 3 in `llm/provider-factory.test.ts` (`validateModelCredential`).
 
 ## Phase 12: Re-review
 **Goal:** developers can trigger a new review by hand.
