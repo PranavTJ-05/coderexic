@@ -42,6 +42,7 @@ import {
   type ModelReviewOutput,
   type ParsedRepositoryConfig,
   type PRFile,
+  type ProviderRegistry,
   type PullRequest,
   type Repository,
   type RepositoryRulesFile,
@@ -87,6 +88,16 @@ export interface ReviewPipelineDeps {
    * tests that need to prove the TIMED_OUT path without an actual 180s wait.
    */
   agentDeadlineMs?: number;
+  /**
+   * Every provider this deployment has a key configured for (ROADMAP.md
+   * Phase 10's provider factory). When a repo's `.coderexic.yml` names a
+   * `model:` this deployment has an entry for, that provider's adapter
+   * runs the review instead of the fixed `model`/`agentAdapter` above;
+   * otherwise the fixed deps are used and a config warning is added.
+   * Optional so tests that don't care about multi-provider selection can
+   * omit it.
+   */
+  providers?: ProviderRegistry;
 }
 
 /**
@@ -225,9 +236,31 @@ export async function processReviewJob(
       ? Math.max(configuredReviewSeconds, MIN_AGENT_REVIEW_SECONDS)
       : configuredReviewSeconds;
     const ignoreGlobs = [...dbIgnorePatterns, ...config.ignore];
-    if (config.warnings.length > 0) {
+
+    // .coderexic.yml's `model:` field is untrusted repo input - an enum only (SUPPORTED_MODEL_PROVIDERS),
+    // never a base URL or model name, so it can only ever pick among providers this deployment already
+    // configured a key for. A repo naming an unconfigured provider falls back to the deployment default
+    // with a warning, same as any other bad config field (PRODUCT_SPEC.md §18).
+    const configWarnings = [...config.warnings];
+    const resolvedEntry = config.model ? deps.providers?.[config.model] : undefined;
+    if (config.model && !resolvedEntry) {
+      configWarnings.push(
+        `model "${config.model}" is not configured on this deployment; using the default`,
+      );
+    }
+    const resolvedProvider = resolvedEntry?.provider ?? provider;
+    const resolvedModelName = resolvedEntry?.modelName ?? modelName;
+    const resolvedModel = resolvedEntry?.reviewModel ?? model;
+    // A repo's provider choice can only swap *which* adapter runs within whichever mode this
+    // deployment is already in - it must never turn the agent loop on when AGENT_LOOP_ENABLED
+    // (deps.agentAdapter's presence) is off globally.
+    const resolvedAgentAdapter = deps.agentAdapter
+      ? (resolvedEntry?.agentAdapter ?? deps.agentAdapter)
+      : undefined;
+
+    if (configWarnings.length > 0) {
       log.warn(
-        { warnings: config.warnings },
+        { warnings: configWarnings },
         'repository config has issues; falling back per field',
       );
     }
@@ -248,8 +281,8 @@ export async function processReviewJob(
         reviewJobId,
         jobStatus: 'SUCCEEDED',
         review: {
-          provider,
-          model: modelName,
+          provider: resolvedProvider,
+          model: resolvedModelName,
           status: 'SUCCEEDED',
           summary: 'No reviewable files in this diff.',
           filesConsidered: files.length,
@@ -286,8 +319,8 @@ export async function processReviewJob(
       // Bad repo config never vanishes silently (PRODUCT_SPEC.md §18): surface it in
       // the posted review, not just the logs.
       const summary =
-        config.warnings.length > 0
-          ? `${output.summary}\n\n⚠️ Repository config warnings: ${config.warnings.join('; ')}`
+        configWarnings.length > 0
+          ? `${output.summary}\n\n⚠️ Repository config warnings: ${configWarnings.join('; ')}`
           : output.summary;
 
       const publishError = await publishReview(client, ref, pr, reviewJobId, summary, built, log);
@@ -296,8 +329,8 @@ export async function processReviewJob(
         reviewJobId,
         jobStatus: publishError ? 'FAILED' : 'SUCCEEDED',
         review: {
-          provider,
-          model: modelName,
+          provider: resolvedProvider,
+          model: resolvedModelName,
           status: publishError ? 'FAILED' : 'SUCCEEDED',
           summary,
           filesConsidered: files.length,
@@ -317,8 +350,8 @@ export async function processReviewJob(
       if (publishError) log.error({ publishError }, 'review job completed with a publish failure');
     }
 
-    if (deps.agentAdapter) {
-      await runAgentBranch(deps.agentAdapter, {
+    if (resolvedAgentAdapter) {
+      await runAgentBranch(resolvedAgentAdapter, {
         db,
         client,
         ref,
@@ -331,8 +364,8 @@ export async function processReviewJob(
         settings,
         ignoreGlobs,
         deadlineMs: deps.agentDeadlineMs ?? maxReviewSeconds * 1000,
-        provider,
-        modelName,
+        provider: resolvedProvider,
+        modelName: resolvedModelName,
         reviewJobId,
         startedAt,
         log,
@@ -348,7 +381,7 @@ export async function processReviewJob(
       controller.abort();
     }, maxReviewSeconds * 1000);
     try {
-      const output = await model.generateReview(
+      const output = await resolvedModel.generateReview(
         {
           repositoryFullName: repository.fullName,
           pullRequestTitle: pr.title,

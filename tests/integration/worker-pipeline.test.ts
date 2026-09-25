@@ -339,6 +339,61 @@ describe('worker: processReviewJob', () => {
     expect(client.createReviewCalls[0]?.comments).toHaveLength(1);
   });
 
+  it('uses the provider a repo names in .coderexic.yml, when this deployment has one configured', async () => {
+    const { job } = await makeReviewJob(db);
+    const client = fakeClient({ repoFiles: { '.coderexic.yml': 'model: groq\n' } });
+    const { model: defaultModel, calls: defaultCalls } = recordingModel(FINDING_OUTPUT);
+    const { model: groqModel, calls: groqCalls } = recordingModel(FINDING_OUTPUT);
+    const deps = {
+      db,
+      githubApp: fakeGithubApp(client),
+      model: defaultModel,
+      provider: 'gemini',
+      modelName: 'gemini-default',
+      logger,
+      providers: {
+        groq: {
+          provider: 'groq' as const,
+          modelName: 'llama-groq',
+          reviewModel: groqModel,
+          // Not exercised: deps.agentAdapter is unset, so the one-shot path runs regardless
+          // of which provider .coderexic.yml names. A real reject proves this adapter was
+          // never invoked, unlike a bare object stand-in that only fails once called.
+          agentAdapter: { chat: () => Promise.reject(new Error('agent loop should not run here')) },
+        },
+      },
+    };
+
+    await processReviewJob(deps, job.id);
+
+    expect(defaultCalls).toHaveLength(0);
+    expect(groqCalls).toHaveLength(1);
+    const [reviewRow] = await db.select().from(reviews).where(eq(reviews.reviewJobId, job.id));
+    expect(reviewRow).toMatchObject({ provider: 'groq', model: 'llama-groq' });
+  });
+
+  it('falls back to the default provider with a config warning when the named provider is not configured', async () => {
+    const { job } = await makeReviewJob(db);
+    const client = fakeClient({ repoFiles: { '.coderexic.yml': 'model: anthropic\n' } });
+    const { model: defaultModel, calls: defaultCalls } = recordingModel(FINDING_OUTPUT);
+    const deps = {
+      db,
+      githubApp: fakeGithubApp(client),
+      model: defaultModel,
+      provider: 'gemini',
+      modelName: 'gemini-default',
+      logger,
+      providers: {},
+    };
+
+    await processReviewJob(deps, job.id);
+
+    expect(defaultCalls).toHaveLength(1);
+    const [reviewRow] = await db.select().from(reviews).where(eq(reviews.reviewJobId, job.id));
+    expect(reviewRow).toMatchObject({ provider: 'gemini', model: 'gemini-default' });
+    expect(client.createReviewCalls[0]?.body).toContain('not configured on this deployment');
+  });
+
   it('reads the rules file (first match in precedence order) from the base sha and passes it to the model', async () => {
     const { job } = await makeReviewJob(db);
     const client = fakeClient({

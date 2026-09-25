@@ -9,6 +9,7 @@ import {
   type GitHubApp,
   type IndexQueueJob,
   type Logger,
+  type ProviderRegistry,
   type ReviewModel,
   type ReviewQueueJob,
 } from '@coderexic/core';
@@ -25,6 +26,8 @@ export interface ReviewWorkerDeps {
   agentAdapter?: AgentAdapter;
   provider: string;
   modelName: string;
+  /** Every provider this deployment has a key for (ROADMAP.md Phase 10), for a repo's `.coderexic.yml` `model:` override. */
+  providers?: ProviderRegistry;
   concurrency?: number;
   /** How often the stale-job sweep runs. */
   sweepIntervalMs?: number;
@@ -85,6 +88,7 @@ export function createReviewWorker(deps: ReviewWorkerDeps): Worker {
               logger: deps.logger,
               ...(indexQueue !== undefined && { indexQueue }),
               ...(deps.agentAdapter !== undefined && { agentAdapter: deps.agentAdapter }),
+              ...(deps.providers !== undefined && { providers: deps.providers }),
             },
             job.reviewJobId,
           ),

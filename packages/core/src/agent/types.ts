@@ -66,6 +66,18 @@ export type AgentMessage =
 
 export interface AgentChatOptions {
   signal?: AbortSignal;
+  /**
+   * Forces the model to call exactly this tool this turn, instead of
+   * choosing freely. Used to build a one-shot `ReviewModel` on top of any
+   * `AgentAdapter` (`llm/one-shot-from-agent.ts`): a single `chat()` call
+   * with `toolChoice: { name: 'submit_review' }` and no other tools gets a
+   * schema-shaped answer back without a whole agent loop, and works
+   * uniformly across providers that support forced tool calls (OpenAI,
+   * Groq, Anthropic - Gemini's `functionCallingConfig` mode `ANY`). A
+   * provider that can't force a call ignores this and falls back to
+   * prompting; the composer's fallback-parsing path covers that case.
+   */
+  toolChoice?: { name: string };
 }
 
 export interface AgentChatResult {

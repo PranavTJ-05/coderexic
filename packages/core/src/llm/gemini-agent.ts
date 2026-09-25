@@ -8,6 +8,7 @@ import type {
 import type { Logger } from '../logger.js';
 import { callGeminiApi } from './gemini-http.js';
 import { DEFAULT_GEMINI_MODEL } from './gemini.js';
+import { DEFAULT_REQUEST_TIMEOUT_MS } from './http-policy.js';
 
 export interface GeminiAgentAdapterOptions {
   apiKey: string;
@@ -156,7 +157,15 @@ export function createGeminiAgentAdapter({
 }: GeminiAgentAdapterOptions): AgentAdapter {
   const log = logger.child({ component: 'gemini-agent', model });
   const url = `${baseUrl}/v1beta/models/${model}:generateContent`;
-  const httpOptions = { apiKey, fetch, baseUrl, logger: log, maxRetries, retryBaseMs };
+  const httpOptions = {
+    apiKey,
+    fetch,
+    baseUrl,
+    logger: log,
+    maxRetries,
+    retryBaseMs,
+    requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+  };
 
   return {
     async chat(messages, tools, options = {}): Promise<AgentChatResult> {

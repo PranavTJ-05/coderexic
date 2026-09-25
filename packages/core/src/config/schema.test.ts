@@ -33,9 +33,17 @@ describe('parseRepositoryConfig', () => {
   });
 
   it('rejects an unsupported model provider with a warning, not a crash', () => {
-    const result = parseRepositoryConfig({ model: 'openai' });
+    const result = parseRepositoryConfig({ model: 'llama-self-hosted' });
     expect(result.model).toBeNull();
-    expect(result.warnings[0]).toContain('openai');
+    expect(result.warnings[0]).toContain('llama-self-hosted');
+  });
+
+  it('accepts every provider in the current catalog', () => {
+    for (const provider of ['gemini', 'openai', 'anthropic', 'groq']) {
+      const result = parseRepositoryConfig({ model: provider });
+      expect(result.model).toBe(provider);
+      expect(result.warnings).toEqual([]);
+    }
   });
 
   it('rejects an invalid min_severity with a warning', () => {

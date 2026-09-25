@@ -309,4 +309,43 @@ describe('worker: processReviewJob (agent loop)', () => {
     const [runRow] = await db.select().from(agentRuns).where(eq(agentRuns.reviewId, reviewRow!.id));
     expect(runRow).toMatchObject({ status: 'TIMED_OUT', terminationReason: 'TIMEOUT' });
   });
+
+  it('runs the agent loop against the .coderexic.yml-selected provider, not the deployment default', async () => {
+    const { repository, job } = await makeReviewJob(db, HEAD_SHA);
+    await markRepositoryIndexed(db, repository.id, BASE_SHA);
+    const client = fakeClient({ '.coderexic.yml': 'model: groq\n' });
+
+    const defaultAdapter: AgentAdapter = {
+      chat: () => Promise.reject(new Error('default provider should not run here')),
+    };
+    const groqAdapter = scriptedAdapter([
+      { text: null, toolCalls: [{ id: '1', name: 'submit_review', args: FINDING_OUTPUT }] },
+    ]);
+
+    await processReviewJob(
+      {
+        db,
+        githubApp: fakeGithubApp(client),
+        model: unusedModel(),
+        agentAdapter: defaultAdapter,
+        provider: 'gemini',
+        modelName: 'gemini-default',
+        logger,
+        providers: {
+          groq: {
+            provider: 'groq',
+            modelName: 'llama-groq',
+            reviewModel: unusedModel(),
+            agentAdapter: groqAdapter,
+          },
+        },
+      },
+      job.id,
+    );
+
+    const [jobRow] = await db.select().from(reviewJobs).where(eq(reviewJobs.id, job.id));
+    expect(jobRow?.status).toBe('SUCCEEDED');
+    const [reviewRow] = await db.select().from(reviews).where(eq(reviews.reviewJobId, job.id));
+    expect(reviewRow).toMatchObject({ provider: 'groq', model: 'llama-groq' });
+  });
 });

@@ -1,8 +1,19 @@
 import { z } from 'zod';
 import { SEVERITIES, type Severity } from '../db/schema.js';
 
-/** Providers this deployment can actually run (ARCHITECTURE.md §12; Phase 10 adds more). */
-export const SUPPORTED_MODEL_PROVIDERS = ['gemini'] as const;
+/**
+ * Providers this deployment can actually run (ARCHITECTURE.md §12,
+ * ROADMAP.md Phase 10). This is the full catalog a repo's `.coderexic.yml`
+ * `model:` field may name - an enum only, never a base URL or model
+ * string, since that field is untrusted repository input (an arbitrary
+ * base URL, e.g. for a self-hosted Ollama, would be an SSRF). Whether a
+ * *given deployment* actually has that provider configured (a key set) is
+ * a separate question the provider factory (`llm/provider-factory.ts`)
+ * answers at runtime; a repo naming an unconfigured provider falls back
+ * to the deployment's default with a config warning, same as any other
+ * invalid field (PRODUCT_SPEC.md §18).
+ */
+export const SUPPORTED_MODEL_PROVIDERS = ['gemini', 'openai', 'anthropic', 'groq'] as const;
 export type SupportedModelProvider = (typeof SUPPORTED_MODEL_PROVIDERS)[number];
 
 /**

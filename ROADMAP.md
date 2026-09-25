@@ -417,18 +417,154 @@ multi-turn conversation end to end.
 
 ## Phase 10: Multi-provider models
 **Goal:** providers are interchangeable.
-- [ ] OpenAI
-- [ ] Anthropic
-- [ ] Gemini
-- [ ] Ollama
-- [ ] Provider factory
-- [ ] Provider health checks
-- [ ] Timeout policy
-- [ ] Retry policy
-- [ ] Usage tracking
+- [x] OpenAI - `llm/openai.ts`, on the shared `llm/openai-compatible.ts`
+      adapter (see below).
+- [x] Anthropic - `llm/anthropic.ts`, raw HTTP against the Messages API (no
+      SDK, matching every other adapter here - ARCHITECTURE.md §22). Tool
+      results for one assistant turn's `tool_use` blocks are batched into a
+      single following `user` message (Anthropic's parallel-tool-use
+      contract), the same way Gemini batches `functionResponse` parts. A
+      `type: ['string','null']` schema field (`suggested_code`) becomes
+      plain `'string'` - Anthropic has no `nullable` keyword, and the field
+      is already outside `required`.
+- [x] Gemini - unchanged from Phases 4/9, now one entry among several
+      instead of the only one.
+- [x] Groq - **added beyond the original checklist**, at the user's
+      request (a free key was available for live verification). Groq's API
+      is OpenAI-compatible, so `llm/groq.ts` is a ~30-line wrapper around
+      the same `llm/openai-compatible.ts` adapter OpenAI uses - only
+      `baseUrl`/default model differ.
+- [ ] Ollama - **not built this phase.** No usable local instance was
+      available (port 11434 empty, no `ollama` CLI; the only reachable
+      Ollama was a *different* project's container with no tool-capable
+      model pulled, and the user asked not to touch it). Adding it later is
+      close to free: it's the same `llm/openai-compatible.ts` code path
+      Groq already uses, pointed at Ollama's own OpenAI-compat endpoint.
+- [x] Provider factory - `llm/provider-factory.ts`'s `buildProviderRegistry`:
+      given whichever provider credentials a deployment actually has (each
+      one optional), returns a `ReviewModel`/`AgentAdapter` pair per
+      provider. Every provider *except* Gemini gets its one-shot
+      `ReviewModel` for free via a new `llm/one-shot-from-agent.ts`, which
+      composes one out of any `AgentAdapter`: a single `chat()` call with
+      only the `submit_review` tool and a new `toolChoice` option forcing
+      it (falling back to text-parsing if a provider ignores that) - so no
+      provider needs its own separate one-shot request-building code, the
+      way Gemini's dedicated `createGeminiAdapter` still has from Phase 4.
+      Wired into `apps/worker/src/index.ts`: only providers with a key
+      actually set get a registry entry, and a repo's `.coderexic.yml`
+      `model:` field (an enum only - never a base URL or model string, since
+      that's untrusted repo input and an arbitrary URL would be an SSRF)
+      can pick among them per review, falling back to the deployment
+      default with a config warning if it names one that isn't configured.
+      A repo's provider choice can only swap *which* adapter runs within
+      whichever mode (one-shot or agent-loop) this deployment is already
+      in - it can never turn the agent loop on when `AGENT_LOOP_ENABLED` is
+      off globally (a real bug during development: the first version let
+      any configured provider's `agentAdapter` silently enable agent mode
+      regardless of the flag - caught by the integration test below, which
+      failed until the gate was fixed).
+- [x] Provider health checks - `checkProviderHealth`: a no-token models-list
+      GET per provider (`/models`, or Anthropic's `/v1/models`), run once at
+      worker startup for the selected default provider. Logs a warning on
+      failure; never crashes startup on a transient error. The same
+      function doubles as Phase 11's "provider-specific credential
+      validation" - a 401/403 there means the key itself is bad.
+- [x] Timeout policy - `llm/http-policy.ts`'s `postJsonWithRetry`, shared by
+      every raw-HTTP adapter (Gemini, OpenAI-compatible, Anthropic): a
+      per-attempt `requestTimeoutMs` ceiling (default 60s,
+      `DEFAULT_REQUEST_TIMEOUT_MS`) combined with the caller's own
+      `AbortSignal` via `AbortSignal.any`, constructed fresh inside the
+      retry loop rather than once outside it - an earlier version built one
+      `AbortSignal.timeout` before the loop, which made it a single
+      deadline for the *whole* call (including every retry's backoff wait)
+      rather than a timeout on each attempt individually; a slow-but-alive
+      provider on attempt 1 could burn through the deadline before attempt
+      2 even started. `checkProviderHealth`'s own models-list call also
+      gets a 5s timeout now, so a hung TCP connection can't block worker
+      startup forever.
+- [x] Retry policy - same shared helper: retries on 429/503 by default,
+      Anthropic also retries its 529 ("overloaded"). Never includes a
+      provider's response body in a thrown error, even for a non-retried
+      failure (only the HTTP status) - a provider's 401 body can echo a
+      fragment of the key that was sent, and error messages end up in
+      `review_jobs.error_message` and in logs.
+- [x] Usage tracking - every `AgentAdapter.chat()` result carries
+      `usage.inputTokens`/`outputTokens` where the provider reports them;
+      `runAgentLoop` accumulates it across turns, and the pipeline now
+      threads it into `reviews.input_tokens`/`output_tokens` (bigint
+      columns that existed since Phase 2 but were never populated before
+      this). Agent-loop path only - the one-shot path's usage isn't
+      wired, matching the fact that Phase 7's `TokenBudget` still has no
+      caller either (see Phase 7's entry above, still true).
+
+**Anthropic specifics, worth calling out since they came from a targeted
+review rather than being obvious up front** (checked against the bundled
+`claude-api` skill, not recalled from training):
+- `DEFAULT_ANTHROPIC_MODEL` is `claude-opus-5`, not a cheaper tier - the
+  skill is explicit that the default should never be downgraded for cost
+  without being told to. Override with `ANTHROPIC_MODEL` if that's not
+  what you want for an automated per-PR reviewer.
+- `claude-sonnet-5`/`claude-opus-5` both run adaptive thinking by default
+  whenever a request omits `thinking` entirely, which this adapter always
+  does - so a response routinely includes `thinking` blocks. The adapter
+  now stores the raw response `content` array in `providerData` and echoes
+  it back verbatim for a later turn (the same pattern Gemini's adapter
+  uses for its own provider-specific fields), instead of reconstructing
+  the assistant turn from just the normalized text/`ToolCall[]` fields -
+  which would have silently dropped every `thinking` block.
+- `llm/one-shot-from-agent.ts`'s forced `toolChoice` is real for
+  OpenAI/Groq but the Anthropic adapter never sends `tool_choice` at all,
+  even when asked: forcing a specific tool is documented as incompatible
+  with extended thinking, which (again) these models run by default here.
+  The one-shot composer's existing text-parsing fallback (for a provider
+  that ignores `toolChoice`) covers this - Anthropic still calls
+  `submit_review` in practice, since with `tool_choice: auto` and only one
+  tool offered it's the obvious choice, just not a guaranteed one.
+- `max_tokens` is 16000 for a non-streaming request (the skill's own
+  guidance), not the original 8192 - low enough that a `tool_use` block
+  competing with thinking output risked truncation.
 
 **Done when:** switching providers doesn't require any change to the review
-engine.
+engine. Done for the agent-loop path (every provider is an `AgentAdapter`,
+and `runAgentLoop`/`AgentToolExecutor` are already fully provider-neutral)
+and for the one-shot fallback path (every provider is also a `ReviewModel`,
+real or composed). Verified by 6 new unit test files (openai, groq,
+anthropic, one-shot-from-agent, provider-factory, http-policy - 46 tests)
+plus new provider-switching tests in `env.test.ts` (4 new tests: booting on
+Groq alone with no `GEMINI_API_KEY` set, rejecting a selected provider with
+no key, rejecting an unrecognized provider name) and `config/schema.test.ts`
+(the full provider catalog), and 3 new integration tests (2 in
+`worker-pipeline.test.ts` for the one-shot path, 1 in
+`agent-review-pipeline.test.ts` for the agent-loop path) proving a repo's
+`.coderexic.yml` `model:` choice is actually honored, with a config warning
+when it names an unconfigured provider - including the real bug above,
+caught only because that agent-loop test failed against the first version
+of the gating logic.
+
+**Live verification:** Groq only, at the user's request (no OpenAI/
+Anthropic keys, no usable local Ollama). Three runs against the real Groq
+API and the real installed throwaway repo:
+- A direct `GET /openai/v1/models` call found Groq's actual current
+  tool-capable model catalog - `llama-3.3-70b-versatile` (an obvious
+  first guess) turned out to no longer exist there at all, so
+  `DEFAULT_GROQ_MODEL` is pinned to `openai/gpt-oss-20b` instead, checked
+  live rather than guessed.
+- A full `runAgentLoop` run against the real repo: turn 1 called
+  `get_file_content` on `app/layout.tsx` (real fetch, real fenced content
+  returned), turn 2 called `submit_review` with a real, coherent review
+  (`NO_FINDINGS`, matching the trivial synthetic diff). This is the first
+  real multi-turn proof of Phase 9's agent loop working end to end against
+  any provider - the earlier Gemini live check (Phase 9) only ever reached
+  turn 1 before hitting a rate limit.
+- A `createOneShotFromAgentAdapter(createGroqAgentAdapter(...))` run - the
+  actual production default path when `AGENT_LOOP_ENABLED=false` - also
+  produced a real, coherent review against the same repo.
+- OpenAI and Anthropic have no live verification at all this phase - their
+  request/response translation is checked only against unit tests with a
+  fake `fetch`, following the exact shapes documented for each provider's
+  API (Anthropic's via the `claude-api` skill), never exercised against
+  the real endpoints. `gpt-5.1` (OpenAI's default) is an unverified guess,
+  unlike Groq's checked-live default - set `OPENAI_MODEL` if it's wrong.
 
 ## Phase 11: BYOK
 **Goal:** users can bring their own model credentials.
