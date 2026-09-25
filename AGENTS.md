@@ -303,6 +303,63 @@ compiles core first, then apps against core's `dist/`.
   comment on a PR). A successful manual review's only status report is the
   review itself, posted the same way an automatic review's is; posting an
   ack/rejection comment too is a small, cheap follow-up if wanted later.
+- `apps/web` (Phase 13a, Next.js App Router) is a peer of `apps/api`/
+  `apps/worker`, not a client of `apps/api` - it imports `packages/core`
+  directly for DB access (ARCHITECTURE §4's Phase 13a decisions). Two
+  monorepo-integration quirks worth knowing before touching it: (1) `next
+  build` needs `@coderexic/core` **built** (`pnpm --filter @coderexic/core
+  build`) - Next's bundler resolves the package via its `exports` map's
+  `default` condition (built `dist/`) regardless of tsconfig settings,
+  unlike `apps/api`/`apps/worker`'s `tsx --conditions=source`; `pnpm -r
+  build` already handles the ordering. `pnpm typecheck`/`pnpm lint` need
+  no prior build, though - `apps/web/tsconfig.json`'s `"customConditions":
+  ["source"]` (matching `apps/api`/`apps/worker`) makes `tsc`/ESLint
+  resolve straight to `packages/core/src`. (2) `apps/web`'s own local
+  imports (e.g. `from './env'`) must **not** carry a `.js` extension -
+  Turbopack doesn't resolve a `.js` specifier to a sibling `.ts` file the
+  way `tsc`'s `moduleResolution: "bundler"` does, unlike every other
+  `.js`-suffixed import elsewhere in the monorepo (which stays that way
+  under `NodeNext`). `packages/core/src/db/migrate.ts`'s
+  `MIGRATIONS_FOLDER` also had to stop using
+  `new URL('../../drizzle', import.meta.url)` (Turbopack's asset-reference
+  scanner tries to bundle whatever that resolves to, even through
+  `serverExternalPackages`, even for code `apps/web` never calls) in favor
+  of `resolve(dirname(fileURLToPath(import.meta.url)), '../../drizzle')` -
+  same result, invisible to that scanner.
+- Auth (`apps/web/src/auth.ts`): `next-auth` v4, JWT session strategy, no
+  DB adapter - `db/store/users.ts`'s `upsertUser` is called by hand from
+  the `jwt` callback, matched on `githubUserId` (survives a GitHub login
+  rename). The `GithubProvider` is configured against the **GitHub App's
+  own** OAuth client (App settings, not a separate OAuth App) - that's
+  what makes the resulting user token valid for
+  `GET /user/installations`. The GitHub access token is kept on the JWT
+  only (`token.githubAccessToken`) and never copied onto `session` in the
+  `session` callback, since anything on `session` is readable by client
+  JS via `/api/auth/session`; it's decoded server-side only via
+  `getToken` in a Route Handler (`app/api/repos/route.ts`), which is why
+  the authorized-repo list is fetched from a small client component
+  (`app/repo-list.tsx`) rather than rendered in the page's Server
+  Component - `getToken` needs a real `NextRequest`, which a Server
+  Component doesn't have without a hack.
+- `packages/core/src/github/user-access.ts`'s `listAuthorizedRepositories`
+  is the authorization check behind the repo list: it calls GitHub's API
+  with the signed-in user's own token (never an installation token, never
+  trusts a client-supplied installation id or an `owner_login` match), and
+  cross-checks every result against this app's own DB
+  (`removed_at is null`) before returning it - GitHub being right isn't
+  enough on its own (PRODUCT_SPEC §17.10). Throws a typed
+  `GitHubUserAccessError` (carries the HTTP status) rather than a bare
+  `Error`, so a caller can tell a genuinely expired/revoked token (a
+  GitHub App user token expires after 8h by default) from any other
+  failure - `app/api/repos/route.ts` maps a 401 from it to `401 {error:
+  'sign in again'}` rather than a 500. Token refresh isn't implemented;
+  see ROADMAP.md Phase 13a.
+- `NEXTAUTH_URL` is a **required** env var (`webEnvSchema`), not left to
+  next-auth's own default - that default is `http://localhost:3000`,
+  which collides with `apps/api`'s default port and silently sends the
+  OAuth callback to the wrong place. `apps/web`'s dev/start scripts pin a
+  fixed port (`:3001`) rather than relying on `next dev`'s default, to
+  match.
 
 ## Commands
 

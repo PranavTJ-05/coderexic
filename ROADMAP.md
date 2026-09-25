@@ -720,21 +720,183 @@ the manual-trigger path), and `pnpm build` all pass.
 ## Phase 13: Web application
 **Goal:** the hosted product experience.
 
-**Pages:**
-- [ ] Landing page
-- [ ] GitHub login
-- [ ] Onboarding
-- [ ] Repository installation
-- [ ] Dashboard
-- [ ] Repository page
-- [ ] Review history
-- [ ] Settings
-- [ ] Model settings
-- [ ] Review rules
-- [ ] Usage
+Split into three sub-phases/PRs rather than one large one: 13a
+(auth/session/repo-list plumbing) is foundational and needed before any
+page can be gated by "who's signed in"; 13b (read-only dashboard) and 13c
+(settings/rules/BYOK, which finally wires the repo-tier BYOK credential
+into the review pipeline) each get their own review rather than landing as
+one enormous diff.
+
+### Phase 13a: auth, session, installation/repo list
+**Pages:** GitHub login.
+- [x] GitHub login - `apps/web`, a new Next.js app (App Router), added to
+      the workspace. `next-auth` v4 (JWT session strategy, no DB adapter)
+      with a `GithubProvider` configured against the **GitHub App's own**
+      OAuth client (not a separate OAuth App) - only authorizing the App
+      itself yields a user-to-server token that can call
+      `GET /user/installations`. `app/api/auth/[...nextauth]/route.ts`;
+      `getServerSession(authOptions)` gates `app/page.tsx`.
+- [x] Session - JWT-only (`session: {strategy: 'jwt'}`); the app's own
+      `users` table (Phase 2) is upserted on every sign-in via
+      `db/store/users.ts`'s new `upsertUser` (matched by `githubUserId`,
+      which survives a GitHub username change). The GitHub access token
+      lives only in the encrypted session JWT cookie, decoded server-side
+      via `getToken` (`app/api/repos/route.ts`) - the `session` callback
+      never copies it onto the `session` object, which client JS can read
+      via `/api/auth/session`.
+- [x] Installation/repo list - `packages/core/src/github/user-access.ts`'s
+      `listAuthorizedRepositories`: calls `GET /user/installations` and
+      `GET /user/installations/{id}/repositories` with the signed-in
+      user's own token, then cross-checks every result against this app's
+      DB (`removed_at is null`) - never authorizes by `owner_login`
+      matching or a client-supplied installation id, and never shows a
+      repo GitHub reports that this app hasn't independently indexed
+      (PRODUCT_SPEC.md §17.10). Wired into `app/api/repos/route.ts` +
+      `app/repo-list.tsx` (a small client component - a Server Component
+      has no clean way to read the session's access token in next-auth v4
+      without a request object, so the repo list fetches itself
+      client-side instead; see AGENTS.md).
+
+**Architecture decisions** (recorded in ARCHITECTURE.md §4):
+- OAuth/session live in `apps/web`, not `apps/api` - the original sketch
+  predates having a real frontend framework; Auth.js owns its own
+  callback route and cookie, and doesn't integrate cleanly with a
+  separate Fastify process.
+- `apps/web` reads the DB directly through `@coderexic/core` (no HTTP hop
+  through `apps/api`), consistent with ARCHITECTURE §3's "never put a
+  network boundary between packages." `apps/web/tsconfig.json` sets
+  `"customConditions": ["source"]` (matching `apps/api`/`apps/worker`), so
+  `tsc`/ESLint resolve `@coderexic/core` straight from `packages/core/src`
+  - no build needed for `pnpm typecheck`/`pnpm lint`. `next build`'s
+  actual bundling step is different: Next resolves the package via its
+  `exports` map's built-`dist` condition regardless of that tsconfig
+  setting (Next's bundler doesn't read `customConditions`), so
+  `@coderexic/core` genuinely must be built before `apps/web` builds -
+  transparent from the root `pnpm -r build` script, which already runs in
+  dependency order.
+
+**Five real bugs found and fixed while integrating** (none caught by any
+static check on the first pass - most only surfaced by actually running
+`next build`/`next start` from a genuinely clean state, e.g. a fresh
+`packages/core/dist`):
+- `packages/core/src/db/migrate.ts`'s `MIGRATIONS_FOLDER` used
+  `new URL('../../drizzle', import.meta.url)` - the two-argument form is
+  the standard "asset reference" pattern webpack/Turbopack both statically
+  scan for, so Turbopack tried to bundle the referenced `drizzle/`
+  directory even though `apps/web` never calls `runMigrations`, and even
+  though `@coderexic/core` is listed in `next.config.ts`'s
+  `serverExternalPackages` (Turbopack still walks into "external" modules
+  looking for asset references before deciding to externalize them).
+  Fixed by computing the same path without the two-arg `new URL(...)`
+  pattern (`resolve(dirname(fileURLToPath(import.meta.url)), '../../drizzle')`) -
+  behaviorally identical, invisible to Turbopack's asset scanner.
+- Local relative imports inside `apps/web` (e.g. `from './env.js'`) failed
+  to resolve under Turbopack, unlike TypeScript's own `moduleResolution:
+  "bundler"` (which accepts a `.js` specifier resolving to a sibling
+  `.ts` file, the convention the rest of the monorepo uses under
+  `NodeNext`). Fixed by dropping the `.js` extension on `apps/web`'s own
+  local imports specifically (Next's own convention), while
+  `@coderexic/core` imports elsewhere in the monorepo keep their `.js`
+  suffix unchanged.
+- `next build` failed outright with `DATABASE_URL: required` etc. even
+  with zero real usage of those routes at build time. `loadWebEnv()` was
+  called at **module scope** in `src/auth.ts` and
+  `app/api/repos/route.ts`, and `next build`'s "collecting page data" step
+  statically imports every route module to analyze it - unlike
+  `apps/api`/`apps/worker`, which have no separate build-time
+  code-execution step, Next's build genuinely runs server code, and must
+  succeed without real secrets present (secrets are a deploy/runtime
+  concern - a CI build with no secrets configured is a normal, supported
+  thing to do). Fixed by making both `src/auth.ts`'s `getAuthOptions()`
+  and `app/api/repos/route.ts`'s DB handle lazy, memoized on first real
+  call rather than evaluated at import time. Verified by running
+  `next build` with the app's env directory entirely empty (no
+  `.env.local` at all) - it now succeeds - and separately with real values
+  present, confirming the runtime behavior (`/` renders, `/api/repos`
+  401s without a session) is unchanged.
+- `pnpm typecheck`/`pnpm lint` failed on a fresh clone (a real check: `rm
+  -rf packages/core/dist && pnpm typecheck`) - `apps/web`'s tsconfig
+  resolved `@coderexic/core` through its `exports` map's `types` condition
+  (`dist/index.d.ts`), which nothing creates before a plain typecheck
+  runs. Fixed by adding `"customConditions": ["source"]` to
+  `apps/web/tsconfig.json`, matching `apps/api`/`apps/worker`'s tsconfig -
+  `tsc`/ESLint now resolve straight to `packages/core/src`, no build
+  needed for typecheck/lint; `next build`'s own bundling step is
+  unaffected (it still needs `dist`, but `pnpm -r build` already builds in
+  dependency order).
+- The OAuth callback URL was silently wrong: next-auth v4 defaults to
+  `http://localhost:3000` for its own absolute-URL construction when
+  `NEXTAUTH_URL` is unset, colliding with `apps/api`'s own default port.
+  Caught by actually curling `/api/auth/providers` and reading the
+  returned `callbackUrl` rather than assuming. Fixed by making
+  `NEXTAUTH_URL` a required env var and pinning `apps/web`'s dev/start
+  scripts to a fixed port (`:3001`) instead of relying on `next dev`'s
+  default; re-verified the same way afterward.
+
+**GitHub App user tokens expire** (8h by default, unless the App opts
+out) - `listAuthorizedRepositories` now throws a typed
+`GitHubUserAccessError` (carries the HTTP status) instead of a bare
+`Error`, and `app/api/repos/route.ts` maps a 401 from it to `401 {error:
+'sign in again'}` rather than a bare 500. Token **refresh** (storing
+`refresh_token`/`expires_at` on the JWT and refreshing before expiry) is
+not implemented - the alternative is disabling token expiration in the
+GitHub App's own settings. That choice needs the user's input; not made
+unilaterally here.
+
+**Not done this phase (by design):** landing page, onboarding, dashboard,
+repository page, review history, settings, model settings, review rules,
+usage - all Phase 13b/13c. The full Login → Install App → Select repo →
+Configure model → Open PR → Receive review UX isn't met yet; this phase
+only proves the auth/session/authorization plumbing underneath it works.
+
+**Browser-unverified:** confirmed via `next build` (production build
+succeeds) and `next start` + `curl` (unauthenticated `/` renders a working
+sign-in link, `/api/repos` correctly 401s, `/api/auth/providers` responds).
+Never opened in an actual browser - no browser tool available. The
+sign-in redirect through GitHub, the callback, and the authenticated repo
+list are unverified beyond that.
+
+**Done when:** `pnpm typecheck`, `pnpm lint`, `pnpm format:check`,
+`pnpm test` (318 unit tests, +2: `getAuthOptions`'s session callback,
+asserting the GitHub access token never reaches the client-visible
+session), `pnpm test:integration` (159 tests, +9: 2 for
+`upsertUser`/`findUserByGithubId`, 7 for `listAuthorizedRepositories`,
+including the removed-installation and expired-token cases), and `pnpm
+build` (now including `apps/web`) all pass - verified from a clean
+`packages/core/dist` (a fresh clone's state), not just incrementally.
+
+**Before this can be used for real:** the GitHub App needs
+`GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` (from the App's own settings,
+not a new OAuth App), an OAuth callback URL of
+`<NEXTAUTH_URL>/api/auth/callback/github` configured in the App's
+settings, and a decision on the token-expiry question above.
+
+**Not containerized yet:** `apps/web` has no Dockerfile and isn't a
+service in `docker-compose.yml` - `pnpm dev:web` (local Node) is the only
+way to run it today. Adding it to the containerized stack is left to
+whichever later phase actually deploys the web app.
+
+### Phase 13b: read-only dashboard
+**Pages:** Landing page, Onboarding, Repository installation, Dashboard,
+Repository page, Review history.
+
+Not started. Tailwind + shadcn/ui (ARCHITECTURE §21) land here, once
+there's an actual design surface to style - 13a deliberately shipped
+unstyled.
+
+### Phase 13c: settings and BYOK
+**Pages:** Settings, Model settings, Review rules, Usage.
+
+Not started. This is also where the repo-tier BYOK credential
+(`packages/core/src/llm/credential-resolution.ts`'s `resolveProviderEntry`,
+built and tested in Phase 11 but never wired into
+`apps/worker/src/review/pipeline.ts`) finally gets a real settings UI and
+an authorization rule (e.g., only repo admins set a repo-level key) to
+sit behind.
 
 **UX:** a user can go Login → Install App → Select repo → Configure model →
-Open PR → Receive review, without reading developer docs.
+Open PR → Receive review, without reading developer docs. Not met until
+13b/13c land.
 
 ## Phase 14: Observability
 **Goal:** understand the system in production.

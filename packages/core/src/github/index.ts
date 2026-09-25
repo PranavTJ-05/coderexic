@@ -4,3 +4,4 @@ export * from './signature.js';
 export * from './client.js';
 export * from './events.js';
 export * from './commands.js';
+export * from './user-access.js';
