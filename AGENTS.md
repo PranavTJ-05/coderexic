@@ -125,12 +125,38 @@ compiles core first, then apps against core's `dist/`.
   per-path queries. Nothing calls `buildReviewContext` from the review
   pipeline yet; that wiring belongs to the agent loop (Phase 8/9), once
   there's an actual request payload to put the related files into.
-  `ReviewContextCache` (`context/cache.ts`) is scoped to one review job
-  and shared by design with Phase 8's tool executor for duplicate-call
-  prevention - but its dedup key there must track what's actually been
-  **delivered to the model**, separate from the engine's own fetch-content
-  reuse; a changed file's content fetched here for import extraction has
-  never been shown to the model and must never be refused as a duplicate.
+  `ReviewContextCache` (`context/cache.ts`) is scoped to one review job.
+  `context/fetch-content.ts`'s `fetchCachedContent` wraps every
+  `GitHubClient.getFileContent` call made through it: a transient error
+  (network, rate limit) is never cached and is reported as retryable; a
+  permanent per-file problem (`GitHubFileError` - binary, over the size
+  limit, a directory) is cached and reported once with no retry
+  suggestion; only a genuine 404 is cached as "no content". An earlier
+  version of this code caught every error the same way and cached all of
+  them as "file missing" - one transient GitHub 5xx would silently starve
+  the rest of that review.
+- The agent tool executor (`packages/core/src/agent/executor.ts`'s
+  `AgentToolExecutor`) implements AI_AGENT_SPEC.md §5's four tools
+  (`get_file_content`, `get_imports`, `get_dependents`, `submit_review`)
+  against one review's fixed repo/commit - the model only ever supplies a
+  path, never a repository. It reuses `fetchCachedContent` for GitHub-fetch
+  dedup, but keeps a separate `deliveredFiles` set for "already shown to
+  the model" (§10's duplicate-call prevention): a changed file's content
+  the context engine fetched for import extraction has never reached the
+  model, so a first real `get_file_content` call for it must not be
+  refused as a duplicate. `deliveredFiles` is only updated once a fetch
+  actually completes, so a call that hits `toolTimeoutMs` and times out
+  can't poison a later, successful retry with a false "already fetched".
+  `get_imports`/`get_dependents` results are cached under
+  `imports:${path}`/`dependents:${path}` query keys on the same cache
+  (§10's "cache identical graph queries" half, distinct from the file-dedup
+  half). `get_file_content`'s result is wrapped in a `<<<FILE`/`FILE>>>`
+  fence (escaping any pre-existing occurrence of that sequence in the file,
+  same trick as `llm/prompt.ts`'s rules fence) - content is truncated to
+  `maxToolResultBytes` **before** fencing, not after, so a result over the
+  limit still closes its fence rather than reaching the model unclosed.
+  Nothing calls `AgentToolExecutor` yet; wiring it into an actual
+  tool-call loop is Phase 9.
 
 ## Commands
 

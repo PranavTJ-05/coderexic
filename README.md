@@ -7,9 +7,9 @@ consults a dependency graph of the repository (what the changed files
 import and what depends on them), lets an AI agent fetch the related code
 it needs, and posts validated findings as inline review comments.
 
-> **Status:** Phase 7 (context engine). Opening a pull request queues a
-> review job; the worker asks Gemini for findings on the diff and posts
-> them as an inline GitHub review, shaped by each repo's own
+> **Status:** Phase 8 (agent tools). Opening a pull request queues a review
+> job; the worker asks Gemini for findings on the diff and posts them as an
+> inline GitHub review, shaped by each repo's own
 > `.coderexic.yml`/`.verix.yml` and rules file (loaded from the PR's base
 > commit). A push now also queues an incremental dependency-graph index
 > (TypeScript/JavaScript/Python/Go/Rust/Java/Ruby import resolution,
@@ -18,8 +18,11 @@ it needs, and posts validated findings as inline review comments.
 > rather than waiting for the next push. `buildReviewContext`
 > (`packages/core/src/context`) can now answer what a changed file imports,
 > what depends on it, and which related test files exist, ranked into
-> tiers and capped by file size/count - but nothing calls it yet; wiring
-> it into an actual request payload is the agent loop (Phase 8/9). See
+> tiers and capped by file size/count, and `AgentToolExecutor`
+> (`packages/core/src/agent`) can now execute the four tools an agent loop
+> will call (`get_file_content`, `get_imports`, `get_dependents`,
+> `submit_review`) against one review's repo/commit - but nothing calls
+> either one yet; wiring them into an actual tool-call loop is Phase 9. See
 > [ROADMAP.md](ROADMAP.md).
 
 ## Requirements
@@ -71,7 +74,7 @@ apps/worker     Consumes review jobs and index runs from Redis; calls the
                 LLM and publishes GitHub reviews; builds the dependency
                 graph
 packages/core   Shared code: env, logging, db, github, queue, llm, review,
-                config, graph, context (later: agent)
+                config, graph, context, agent
 ```
 
 ## Documentation
