@@ -1,12 +1,16 @@
 import {
+  ACTIVE_JOB_WINDOW_MS,
   automaticReviewKey,
   createIndexRun,
   createReviewJob,
+  findActiveReviewJob,
   findInstallationByGithubId,
   findRepository,
+  hasReviewCommand,
   installationEventSchema,
   installationRepositoriesEventSchema,
   issueCommentEventSchema,
+  manualReviewKey,
   markInstallationRemoved,
   markRepositoriesRemoved,
   pullRequestEventSchema,
@@ -14,6 +18,7 @@ import {
   updateRepositoryHead,
   upsertInstallation,
   upsertRepository,
+  ZERO_SHA,
   type Executor,
   type Installation,
   type Repository,
@@ -235,14 +240,61 @@ async function onPush(ctx: WebhookContext, payload: unknown): Promise<WebhookOut
   return { status: 'PROCESSED', installationId: installation.id, indexRunId: indexRun.id };
 }
 
-function onIssueComment(_ctx: WebhookContext, payload: unknown): Promise<WebhookOutcome> {
+/** GitHub's collaboration-level associations authorized to trigger a manual review. */
+const AUTHORIZED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+
+async function onIssueComment(ctx: WebhookContext, payload: unknown): Promise<WebhookOutcome> {
   const event = parse(issueCommentEventSchema, 'issue_comment', payload);
-  if (!event.issue.pull_request)
-    return Promise.resolve(ignored('comment is not on a pull request'));
-  // Manual review commands (`/review review`) are handled in Phase 12.
-  return Promise.resolve(
-    ignored(`issue_comment.${event.action} recorded; commands not handled yet`),
+  if (event.action !== 'created') return ignored(`issue_comment.${event.action} not handled`);
+  if (!event.issue.pull_request) return ignored('comment is not on a pull request');
+  if (event.issue.state !== 'open') return ignored('pull request is not open');
+  if (!hasReviewCommand(event.comment.body)) return ignored('no recognized command');
+  // A bot (including this app itself) can never trigger a review, regardless
+  // of author_association.
+  if (event.comment.user.type === 'Bot') return ignored('comment author is a bot');
+  if (
+    !event.comment.author_association ||
+    !AUTHORIZED_ASSOCIATIONS.has(event.comment.author_association)
+  ) {
+    // Silently ignored, not a rejection reply - replying would let anyone
+    // make the bot post on a PR it wouldn't otherwise touch.
+    return ignored('commenter is not authorized to trigger a review');
+  }
+
+  const active = await activeRepository(ctx.db, event.installation.id, event.repository);
+  if (!active) return ignored('installation or repository was removed');
+  const { installation, repository } = active;
+
+  const inFlight = await findActiveReviewJob(
+    ctx.db,
+    repository.id,
+    event.issue.number,
+    new Date(Date.now() - ACTIVE_JOB_WINDOW_MS),
   );
+  if (inFlight) return ignored('a review is already queued or running for this pull request');
+
+  // headSha is a placeholder (ZERO_SHA): this handler never calls the
+  // GitHub API, so the real head sha isn't known yet. The worker resolves
+  // it via updateReviewJobHeadSha once it fetches the pull request.
+  const { job, created } = await createReviewJob(ctx.db, {
+    repositoryId: repository.id,
+    installationId: installation.id,
+    pullRequestNumber: event.issue.number,
+    headSha: ZERO_SHA,
+    triggerType: 'manual',
+    idempotencyKey: manualReviewKey(ctx.deliveryId),
+    githubEventId: ctx.deliveryId,
+  });
+  ctx.log.info(
+    {
+      reviewJobId: job.id,
+      repository: repository.fullName,
+      pullRequest: event.issue.number,
+      created,
+    },
+    created ? 'manual review job created' : 'manual review job already exists',
+  );
+  return { status: 'PROCESSED', installationId: installation.id, reviewJobId: job.id };
 }
 
 const HANDLERS: Record<string, (ctx: WebhookContext, payload: unknown) => Promise<WebhookOutcome>> =

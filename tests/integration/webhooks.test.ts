@@ -386,16 +386,136 @@ describe('POST /webhooks/github', () => {
   });
 
   describe('issue_comment events', () => {
-    it('comments are validated and recorded without starting a review yet', async () => {
-      const res = await deliver('issue_comment', {
-        action: 'created',
+    function issueComment(overrides: {
+      action?: string;
+      issueNumber?: number;
+      issueState?: string;
+      isPullRequest?: boolean;
+      body?: string;
+      authorAssociation?: string;
+      userType?: string;
+    }) {
+      return {
+        action: overrides.action ?? 'created',
         installation: { id: INSTALLATION_ID },
         repository,
-        issue: { number: 12, pull_request: {} },
-        comment: { id: 5, body: '/review review', user: owner },
+        issue: {
+          number: overrides.issueNumber ?? 12,
+          state: overrides.issueState ?? 'open',
+          ...((overrides.isPullRequest ?? true) ? { pull_request: {} } : {}),
+        },
+        comment: {
+          id: 5,
+          body: overrides.body ?? '/review review',
+          user: { login: 'commenter', type: overrides.userType ?? 'User' },
+          ...(overrides.authorAssociation !== undefined && {
+            author_association: overrides.authorAssociation,
+          }),
+        },
+      };
+    }
+
+    it('an authorized command creates a manual review job', async () => {
+      const res = await deliver('issue_comment', issueComment({ authorAssociation: 'OWNER' }));
+      expect(res.json()).toEqual({ status: 'processed' });
+      const jobs = await db.select().from(reviewJobs);
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]).toMatchObject({
+        triggerType: 'manual',
+        pullRequestNumber: 12,
+        status: 'PENDING',
       });
+    });
+
+    it('a comment with no command is recorded without starting a review', async () => {
+      const res = await deliver(
+        'issue_comment',
+        issueComment({ body: 'looks good to me', authorAssociation: 'OWNER' }),
+      );
       expect(res.json()).toEqual({ status: 'ignored' });
       expect(await db.select().from(reviewJobs)).toEqual([]);
+    });
+
+    it('a comment not on a pull request is ignored', async () => {
+      const res = await deliver(
+        'issue_comment',
+        issueComment({ isPullRequest: false, authorAssociation: 'OWNER' }),
+      );
+      expect(res.json()).toEqual({ status: 'ignored' });
+      expect(await db.select().from(reviewJobs)).toEqual([]);
+    });
+
+    it('a command on a closed pull request is ignored', async () => {
+      const res = await deliver(
+        'issue_comment',
+        issueComment({ issueState: 'closed', authorAssociation: 'OWNER' }),
+      );
+      expect(res.json()).toEqual({ status: 'ignored' });
+      expect(await db.select().from(reviewJobs)).toEqual([]);
+    });
+
+    it('an edited comment does not re-trigger a review', async () => {
+      const res = await deliver(
+        'issue_comment',
+        issueComment({ action: 'edited', authorAssociation: 'OWNER' }),
+      );
+      expect(res.json()).toEqual({ status: 'ignored' });
+      expect(await db.select().from(reviewJobs)).toEqual([]);
+    });
+
+    it('an unauthorized commenter is silently ignored, no review job', async () => {
+      const res = await deliver(
+        'issue_comment',
+        issueComment({ authorAssociation: 'CONTRIBUTOR' }),
+      );
+      expect(res.json()).toEqual({ status: 'ignored' });
+      expect(await db.select().from(reviewJobs)).toEqual([]);
+    });
+
+    it('a missing author_association is treated as unauthorized', async () => {
+      const res = await deliver('issue_comment', issueComment({}));
+      expect(res.json()).toEqual({ status: 'ignored' });
+      expect(await db.select().from(reviewJobs)).toEqual([]);
+    });
+
+    it('a bot commenter is ignored even with an authorized association', async () => {
+      const res = await deliver(
+        'issue_comment',
+        issueComment({ authorAssociation: 'OWNER', userType: 'Bot' }),
+      );
+      expect(res.json()).toEqual({ status: 'ignored' });
+      expect(await db.select().from(reviewJobs)).toEqual([]);
+    });
+
+    it('a second authorized command while one is already in flight is ignored', async () => {
+      const first = await deliver('issue_comment', issueComment({ authorAssociation: 'OWNER' }));
+      expect(first.json()).toEqual({ status: 'processed' });
+      const second = await deliver('issue_comment', issueComment({ authorAssociation: 'MEMBER' }));
+      expect(second.json()).toEqual({ status: 'ignored' });
+      expect(await db.select().from(reviewJobs)).toHaveLength(1);
+    });
+
+    it('a stale RUNNING row past the active-job window does not block a new command', async () => {
+      const first = await deliver('issue_comment', issueComment({ authorAssociation: 'OWNER' }));
+      expect(first.json()).toEqual({ status: 'processed' });
+      const [stale] = await db.select().from(reviewJobs);
+      await db
+        .update(reviewJobs)
+        .set({ status: 'RUNNING', createdAt: new Date(Date.now() - 31 * 60 * 1000) })
+        .where(eq(reviewJobs.id, stale!.id));
+
+      const second = await deliver('issue_comment', issueComment({ authorAssociation: 'MEMBER' }));
+      expect(second.json()).toEqual({ status: 'processed' });
+      expect(await db.select().from(reviewJobs)).toHaveLength(2);
+    });
+
+    it('a redelivered command is acknowledged as a duplicate, not a second job', async () => {
+      const deliveryId = randomUUID();
+      const payload = issueComment({ authorAssociation: 'OWNER' });
+      await deliver('issue_comment', payload, { delivery: deliveryId });
+      const redelivered = await deliver('issue_comment', payload, { delivery: deliveryId });
+      expect(redelivered.json()).toEqual({ status: 'duplicate' });
+      expect(await db.select().from(reviewJobs)).toHaveLength(1);
     });
   });
 });

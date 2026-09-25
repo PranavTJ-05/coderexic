@@ -1,4 +1,4 @@
-import { and, eq, lt, sql } from 'drizzle-orm';
+import { and, eq, gt, inArray, lt, ne, sql } from 'drizzle-orm';
 import type { Executor } from '../client.js';
 import {
   reviewFindings,
@@ -16,6 +16,15 @@ export type NewReviewFinding = Omit<
   typeof reviewFindings.$inferInsert,
   'id' | 'reviewId' | 'createdAt'
 >;
+
+/**
+ * Placeholder `head_sha` for a manual review job at creation time: the
+ * webhook handler that creates it (`issue_comment`) never calls the GitHub
+ * API (webhook handlers only write to the database), so the real head sha
+ * isn't known yet. The worker overwrites it via `updateReviewJobHeadSha`
+ * once it fetches the pull request.
+ */
+export const ZERO_SHA = '0'.repeat(40);
 
 /** One automatic review per repository, pull request and head commit. */
 export function automaticReviewKey(
@@ -106,6 +115,67 @@ export async function claimReviewJob(
 export async function findReviewJobById(db: Executor, id: string): Promise<ReviewJob | undefined> {
   const [row] = await db.select().from(reviewJobs).where(eq(reviewJobs.id, id));
   return row;
+}
+
+/**
+ * Generous upper bound on "a review might still be in flight", for
+ * `findActiveReviewJob` below - well past any realistic `maxReviewSeconds`
+ * ceiling, so a row a crashed worker never reached a terminal status for
+ * doesn't block re-review on that PR forever. The worker itself always
+ * reaches a terminal status on every non-crash path (see pipeline.ts).
+ */
+export const ACTIVE_JOB_WINDOW_MS = 30 * 60 * 1000;
+
+/**
+ * A PENDING or RUNNING job for this (repository, PR) - optionally narrowed
+ * to a specific head sha, and excluding a given job id - created more
+ * recently than `since`. Implements PRODUCT_SPEC.md §16's "no duplicate
+ * concurrent reviews for the same PR and head SHA" for two cases the
+ * per-head-sha idempotency key alone doesn't cover:
+ *
+ * 1. A manual command must not start a second review while one is already
+ *    in flight for the same PR (checked with no `headSha`, before the
+ *    manual job's own placeholder sha is resolved).
+ * 2. A manual job and an automatic job can race to the same real head sha
+ *    (comment, then push, before the comment's job claims) - each job
+ *    checks for the other (with `headSha` and `excludeId: <its own id>`)
+ *    once its own head sha is known, and whichever loses cancels itself.
+ */
+export async function findActiveReviewJob(
+  db: Executor,
+  repositoryId: string,
+  pullRequestNumber: number,
+  since: Date,
+  options: { headSha?: string; excludeId?: string } = {},
+): Promise<ReviewJob | undefined> {
+  const conditions = [
+    eq(reviewJobs.repositoryId, repositoryId),
+    eq(reviewJobs.pullRequestNumber, pullRequestNumber),
+    inArray(reviewJobs.status, ['PENDING', 'RUNNING']),
+    gt(reviewJobs.createdAt, since),
+  ];
+  if (options.headSha !== undefined) conditions.push(eq(reviewJobs.headSha, options.headSha));
+  if (options.excludeId !== undefined) conditions.push(ne(reviewJobs.id, options.excludeId));
+  const [row] = await db
+    .select()
+    .from(reviewJobs)
+    .where(and(...conditions));
+  return row;
+}
+
+/**
+ * Overwrites a job's head/base sha once the worker has actually fetched the
+ * pull request - needed for a manual trigger, whose row is created with a
+ * placeholder sha (the webhook handler that creates it never calls the
+ * GitHub API; see `ZERO_SHA` in `apps/worker/src/review/pipeline.ts`).
+ */
+export async function updateReviewJobHeadSha(
+  db: Executor,
+  reviewJobId: string,
+  headSha: string,
+  baseSha: string,
+): Promise<void> {
+  await db.update(reviewJobs).set({ headSha, baseSha }).where(eq(reviewJobs.id, reviewJobId));
 }
 
 /** PENDING jobs older than `olderThan`, for the worker's stale-job sweep. */

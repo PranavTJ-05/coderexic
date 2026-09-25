@@ -280,6 +280,29 @@ compiles core first, then apps against core's `dist/`.
   `apps/worker/src/review/pipeline.ts` - a review job has no
   session-derived user, so using the PR author's key would bill whoever
   opened the PR, including fork contributors.
+- Manual re-review (Phase 12): a PR comment `/review review`
+  (`github/commands.ts`'s `hasReviewCommand`) from an `OWNER`/`MEMBER`/
+  `COLLABORATOR` (`comment.author_association`; missing or `Bot` = unauthorized)
+  creates a `manual` review job, handled entirely inside
+  `apps/api/src/webhooks/handlers.ts`'s `onIssueComment` - webhook handlers
+  still make no GitHub API calls, so the job's `head_sha` starts as
+  `ZERO_SHA` (`db/store/review-jobs.ts`, an all-zero 40-hex placeholder) and
+  the worker (`apps/worker/src/review/pipeline.ts`) overwrites it via
+  `updateReviewJobHeadSha` once it actually fetches the PR. A manual job
+  skips the superseded/draft checks an automatic job goes through - an
+  explicit command beats the automatic-trigger policy - but still gets
+  checked against `findActiveReviewJob` twice: once at the webhook handler
+  (no `headSha`, catches a second command while one's already in flight)
+  and once in the pipeline after the real head sha is known (`headSha` +
+  `excludeId`, catches a manual job racing an automatic job to the same
+  commit). Rejections (unauthorized commenter, already in flight, PR
+  closed) are **silent** - by explicit product decision, this phase doesn't
+  post an acknowledgment or rejection comment, since that needs `Issues:
+  write` (confirmed via GitHub's docs: the issue-comment endpoints require
+  `Issues`, not `Pull requests`, permission even when the target is a PR),
+  which PRODUCT_SPEC §7.1 doesn't grant. A successful manual review's only
+  status report is the review itself, posted the same way an automatic
+  review's is.
 
 ## Commands
 
