@@ -7,7 +7,7 @@ consults a dependency graph of the repository (what the changed files
 import and what depends on them), lets an AI agent fetch the related code
 it needs, and posts validated findings as inline review comments.
 
-> **Status:** Phase 12 (re-review on demand). Opening a pull request
+> **Status:** Phase 13a (web app: auth, session, repo list). Opening a pull request
 > queues a review job. `MODEL_PROVIDER` picks which of Gemini, OpenAI,
 > Anthropic or Groq actually runs it (only that provider's API key needs to
 > be set); a repo's own `.coderexic.yml` can pick a different *configured*
@@ -32,7 +32,10 @@ it needs, and posts validated findings as inline review comments.
 > store calls and tests, since there's no web app or auth yet to expose it
 > through. A collaborator can also comment `/review review` on an open pull
 > request to trigger a fresh review by hand, independent of the automatic
-> per-push dedup. See [ROADMAP.md](ROADMAP.md).
+> per-push dedup. `apps/web` is a new Next.js app: a user can sign in with
+> GitHub and see the repositories they're authorized to review through -
+> the rest of the hosted UI (dashboard, settings, model config) is Phase
+> 13b/13c, not built yet. See [ROADMAP.md](ROADMAP.md).
 
 ## Requirements
 
@@ -52,6 +55,10 @@ docker compose up -d postgres redis
 pnpm db:migrate
 pnpm dev:api                      # http://127.0.0.1:3000/health
 pnpm dev:worker
+
+# apps/web (Phase 13a) needs its own env file - see apps/web/.env.example
+cp apps/web/.env.example apps/web/.env.local
+pnpm dev:web                      # http://localhost:3001 (fixed port; apps/api already owns :3000)
 ```
 
 Full stack in containers:

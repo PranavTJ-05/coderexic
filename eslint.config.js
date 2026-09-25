@@ -4,7 +4,15 @@ import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-  { ignores: ['**/dist/**', '**/coverage/**', '**/node_modules/**'] },
+  {
+    ignores: [
+      '**/dist/**',
+      '**/coverage/**',
+      '**/node_modules/**',
+      'apps/web/.next/**',
+      'apps/web/next-env.d.ts',
+    ],
+  },
   js.configs.recommended,
   ...tseslint.configs.strictTypeChecked,
   {
@@ -31,6 +39,12 @@ export default tseslint.config(
     files: ['**/*.test.ts'],
     rules: {
       '@typescript-eslint/no-non-null-assertion': 'off',
+    },
+  },
+  {
+    files: ['apps/web/**/*.{ts,tsx}'],
+    languageOptions: {
+      globals: globals.browser,
     },
   },
   {

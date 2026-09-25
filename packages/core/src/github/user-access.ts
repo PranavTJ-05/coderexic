@@ -1,0 +1,120 @@
+import type { Executor } from '../db/client.js';
+import { findInstallationByGithubId } from '../db/store/installations.js';
+import { findRepository } from '../db/store/repositories.js';
+
+/**
+ * A `listAuthorizedRepositories` call failed against GitHub's API itself -
+ * distinct from "authorized, but nothing found." `status` lets a caller
+ * tell an expired/revoked token (401 - GitHub App user tokens expire after
+ * 8h unless the App opts out) from a transient failure.
+ */
+export class GitHubUserAccessError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = 'GitHubUserAccessError';
+  }
+}
+
+export interface AuthorizedRepository {
+  installationId: string;
+  githubInstallationId: number;
+  repositoryId: string;
+  githubRepositoryId: number;
+  fullName: string;
+}
+
+interface GitHubInstallationSummary {
+  id: number;
+}
+interface GitHubRepoSummary {
+  id: number;
+  full_name: string;
+}
+
+async function paginateGitHub<T>(
+  path: string,
+  key: string,
+  userAccessToken: string,
+  fetchImpl: typeof globalThis.fetch,
+): Promise<T[]> {
+  const results: T[] = [];
+  for (let page = 1; ; page++) {
+    const separator = path.includes('?') ? '&' : '?';
+    const response = await fetchImpl(
+      `https://api.github.com${path}${separator}per_page=100&page=${page}`,
+      {
+        headers: {
+          authorization: `Bearer ${userAccessToken}`,
+          accept: 'application/vnd.github+json',
+        },
+      },
+    );
+    if (!response.ok) {
+      throw new GitHubUserAccessError(
+        `GitHub API request to ${path} failed with status ${response.status}`,
+        response.status,
+      );
+    }
+    const body = (await response.json()) as Record<string, unknown>;
+    const items = body[key];
+    if (!Array.isArray(items) || items.length === 0) break;
+    results.push(...(items as T[]));
+    if (items.length < 100) break;
+  }
+  return results;
+}
+
+/**
+ * Every repository this GitHub user is actually authorized to see through
+ * the app, for the web dashboard's repo list (Phase 13a). Uses the user's
+ * own GitHub App user-to-server access token (from the OAuth callback,
+ * never the app's installation token) so the answer reflects GitHub's own
+ * membership/permission model - including an org's "selected repositories"
+ * install, where a member sees only some of the org's repos even though
+ * the org owner sees all of them. Never authorizes by `owner_login`
+ * matching or a client-supplied installation id; every result is cross-
+ * checked against our own DB (`removed_at is null`), so a deselected
+ * repository or an uninstalled app never shows up even if GitHub's API is
+ * momentarily stale (PRODUCT_SPEC.md §17.10, no cross-user/cross-repo
+ * leakage).
+ */
+export async function listAuthorizedRepositories(
+  db: Executor,
+  userAccessToken: string,
+  fetchImpl: typeof globalThis.fetch = globalThis.fetch,
+): Promise<AuthorizedRepository[]> {
+  const installations = await paginateGitHub<GitHubInstallationSummary>(
+    '/user/installations',
+    'installations',
+    userAccessToken,
+    fetchImpl,
+  );
+
+  const results: AuthorizedRepository[] = [];
+  for (const installation of installations) {
+    const known = await findInstallationByGithubId(db, installation.id);
+    if (!known || known.removedAt) continue;
+
+    const repos = await paginateGitHub<GitHubRepoSummary>(
+      `/user/installations/${installation.id}/repositories`,
+      'repositories',
+      userAccessToken,
+      fetchImpl,
+    );
+    for (const repo of repos) {
+      const knownRepo = await findRepository(db, known.id, repo.id);
+      if (!knownRepo || knownRepo.removedAt) continue;
+      results.push({
+        installationId: known.id,
+        githubInstallationId: installation.id,
+        repositoryId: knownRepo.id,
+        githubRepositoryId: repo.id,
+        fullName: knownRepo.fullName,
+      });
+    }
+  }
+  return results;
+}

@@ -36,18 +36,19 @@ The spec's full monorepo sketch:
 A smaller first build may be one TypeScript app with modules. Never put a
 network boundary between packages.
 
-**Decision:** Coderexic uses the lean variant. It has `apps/api` and
-`apps/worker` (with `apps/web` in Phase 13), and one `packages/core` split
+**Decision:** Coderexic uses the lean variant. It has `apps/api`,
+`apps/worker` and `apps/web` (Phase 13a), and one `packages/core` split
 into folders.
 
 ## 4. Runtime components
 - **API:**
   - health checks
-  - GitHub OAuth (if there's a hosted UI)
   - webhooks and install callbacks
-  - user settings
-  - review-status APIs
   - It never runs agent reviews itself.
+- **Web** (`apps/web`, Phase 13a): the hosted UI, GitHub OAuth/session, user
+  settings, review-status pages. See "Decisions made while implementing
+  (Phase 13a)" below for why this moved off the original sketch's "API"
+  bullet.
 - **Worker:** consumes review jobs. It fetches the PR, loads config, makes
   sure the graph is current, runs the agent, validates findings, publishes the
   GitHub review and persists the result.
@@ -60,6 +61,39 @@ into folders.
   - review jobs, reviews and findings
   - provider config metadata and encrypted credentials
   - audit events
+
+### Decisions made while implementing (Phase 13a)
+- **GitHub OAuth and session live in `apps/web`, not `apps/api`.** The
+  original sketch (§4 above, pre-13a) put "GitHub OAuth (if there's a hosted
+  UI)" under API. Once there was a hosted UI (Next.js, per §21), the
+  practical choice was Auth.js/next-auth, which is a Next.js library - it
+  owns the OAuth callback route and the session cookie itself, and doesn't
+  integrate cleanly with a separate Fastify process. `apps/api` keeps
+  webhooks and install callbacks only; it has no user-facing routes.
+- **`apps/web` reads the database directly through `@coderexic/core`, not
+  through `apps/api` over HTTP.** Consistent with §3's "never put a network
+  boundary between packages" - `apps/web` is a peer of `apps/api`/
+  `apps/worker`, all three importing the same `packages/core` store
+  functions directly, not a client of `apps/api`. The operational cost:
+  `apps/web/tsconfig.json` sets `"customConditions": ["source"]`
+  (matching `apps/api`/`apps/worker`), so `tsc`/ESLint resolve
+  `@coderexic/core` straight from `packages/core/src` - `pnpm typecheck`/
+  `pnpm lint` need no prior build. Next's own bundler doesn't read that
+  tsconfig setting, though: `next build` resolves the package via its
+  `exports` map's `default` (built `dist/`) condition regardless, so
+  `@coderexic/core` genuinely must be built (`pnpm --filter
+  @coderexic/core build`) before `apps/web` can build - transparent from
+  the root `pnpm -r build` script, which already runs in dependency order.
+- **Authorization for "which repos can this user see" never trusts GitHub's
+  API alone.** `packages/core/src/github/user-access.ts`'s
+  `listAuthorizedRepositories` calls `GET /user/installations` and
+  `GET /user/installations/{id}/repositories` with the signed-in user's own
+  GitHub App user-to-server token (not an installation token), then
+  cross-checks every result against this app's own DB rows
+  (`removed_at is null`) - so a deselected repository or an uninstalled app
+  never shows up even if GitHub's API were momentarily stale, and an org
+  member only ever sees the subset of an "all repositories" install that
+  their own GitHub permissions actually grant (PRODUCT_SPEC.md §17.10).
 
 ## 5. GitHub integration
 Wrap GitHub in a `GitHubClient` abstraction. Nothing else in the app depends

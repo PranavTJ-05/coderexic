@@ -3,6 +3,7 @@ import {
   completeReview,
   createReviewJob,
   findInstallationByGithubId,
+  findUserByGithubId,
   getRepositorySettings,
   IdempotencyConflictError,
   manualReviewKey,
@@ -16,6 +17,7 @@ import {
   reviews,
   upsertInstallation,
   upsertRepository,
+  upsertUser,
 } from '@coderexic/core';
 import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
@@ -24,6 +26,36 @@ import { makeInstallation, makeRepository, makeReviewJob } from './fixtures.js';
 
 describe('store', () => {
   const { db } = useTestDatabase();
+
+  describe('users', () => {
+    it('upserts by GitHub user ID, bumping lastLoginAt and updating a changed login', async () => {
+      const first = await upsertUser(db, { githubUserId: 42, login: 'octocat' });
+      expect(first.lastLoginAt).not.toBeNull();
+
+      const again = await upsertUser(db, { githubUserId: 42, login: 'octocat-renamed' });
+      expect(again.id).toBe(first.id);
+      expect(again.login).toBe('octocat-renamed');
+      expect(again.lastLoginAt!.getTime()).toBeGreaterThanOrEqual(first.lastLoginAt!.getTime());
+
+      const found = await findUserByGithubId(db, 42);
+      expect(found?.id).toBe(first.id);
+    });
+
+    it('stores optional profile fields and leaves them out when omitted', async () => {
+      const user = await upsertUser(db, {
+        githubUserId: 43,
+        login: 'octodog',
+        displayName: 'Octo Dog',
+        avatarUrl: 'https://example.test/avatar.png',
+        email: 'octodog@example.test',
+      });
+      expect(user).toMatchObject({
+        displayName: 'Octo Dog',
+        avatarUrl: 'https://example.test/avatar.png',
+        email: 'octodog@example.test',
+      });
+    });
+  });
 
   describe('installations', () => {
     it('upserts by GitHub installation ID and restores a removed installation', async () => {

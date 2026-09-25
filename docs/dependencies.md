@@ -122,3 +122,64 @@ Webhook signature verification uses `node:crypto`, not a library.
    runtime `dependencies` entry in `packages/core/package.json`
    specifically because `graph/extract/typescript.ts` and
    `graph/tsconfig.ts` import it at runtime, not just at build time.
+
+## next + react + react-dom (Phase 13a)
+1. **What problem does it solve?** The hosted web UI (`apps/web`) -
+   server-rendered pages, route handlers for OAuth callbacks and
+   authorized data APIs. ARCHITECTURE §21 named Next.js, Tailwind and
+   shadcn/ui as the frontend stack; Tailwind/shadcn are deferred to Phase
+   13b, since 13a has no design surface to style yet.
+2. **Why not the existing stack?** The rest of the monorepo is Fastify
+   (API/worker), which has no browser UI story; there was no frontend
+   framework in the project before this phase.
+3. **Operational cost:** one more deployable process (`apps/web`), same
+   shape as `apps/api`/`apps/worker` - stateless, horizontally scalable,
+   reads `packages/core`'s DB store functions directly (no new service to
+   run; see ARCHITECTURE §4's Phase 13a decisions for why it doesn't go
+   through `apps/api`).
+4. **Local dev:** `pnpm dev:web` (`next dev`). Next reads env from its own
+   `apps/web/.env.local`/`.env`, not the root `.env` the other apps share
+   via `tsx --env-file-if-exists=../../.env` - a real asymmetry, noted in
+   AGENTS.md.
+5. **Production:** `next build` then `next start`, or a static/standalone
+   output later if needed. `@coderexic/core` must be built first
+   (`pnpm --filter @coderexic/core build`) - Next resolves it via its
+   `exports` map's `default` (built `dist/`) condition, not TypeScript
+   source. `next.config.ts`'s `serverExternalPackages` keeps
+   `@coderexic/core` and its own Node-only dependencies (pino, postgres,
+   bullmq, ioredis, octokit) un-bundled, since they're already
+   process-local Node code, not browser-bundlable.
+6. **Can we remove it?** Yes, in principle - `apps/web` is a separate
+   deployable that only imports `packages/core`'s public API, the same as
+   `apps/api`/`apps/worker`. Removing it drops the hosted UI, not any
+   review-pipeline functionality.
+
+## next-auth (Phase 13a)
+1. **What problem does it solve?** GitHub OAuth (specifically: authorizing
+   this GitHub App itself, to get a user-to-server access token - see
+   `apps/web/src/auth.ts`), session issuance and verification for the web
+   UI.
+2. **Why not the existing stack?** Hand-rolling OAuth (the authorization
+   code exchange, CSRF/state validation, session cookie signing and
+   encryption) is exactly the kind of security-sensitive code a
+   battle-tested library should own, matching `octokit`'s justification in
+   Phase 3.
+3. **Operational cost:** none beyond the library itself - no adapter, no
+   extra tables. Configured with the JWT session strategy (`session:
+   {strategy: 'jwt'}`), not the database strategy, so it never creates its
+   own schema; the app's own `users` table (Phase 2) is upserted by hand in
+   the `jwt` callback via `@coderexic/core`'s `upsertUser`.
+4. **Local dev:** needs `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` (the
+   GitHub App's own OAuth client, not a separate OAuth App) and
+   `AUTH_SECRET` in `apps/web/.env.local`.
+5. **Production:** the GitHub access token lives only in the encrypted
+   session JWT (read server-side via `getToken`, e.g.
+   `app/api/repos/route.ts`) - the `session` callback deliberately never
+   copies it onto the `session` object, since anything there is readable
+   by client JS via `/api/auth/session`.
+6. **Can we remove it?** Yes - confined to `apps/web/src/auth.ts` and the
+   `app/api/auth/[...nextauth]` route. **Note for whoever revisits this:**
+   the stable release line is v4 (`4.24.15`); the v5/"Auth.js" rebrand has
+   been in beta for an extended period as of this writing. v4 is the
+   correct choice today, but check its release history before assuming
+   that's still true.
