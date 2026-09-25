@@ -26,6 +26,19 @@ export interface AuthorizedRepository {
   repositoryId: string;
   githubRepositoryId: number;
   fullName: string;
+  /**
+   * The signed-in user's own admin permission on this repository, from
+   * GitHub's `permissions.admin` (verified against GitHub's own OpenAPI
+   * spec: `GET /user/installations/{id}/repositories` returns the shared
+   * `repository` schema, which includes `permissions`). `permissions`
+   * itself isn't a required field on that shared schema, so a missing
+   * value is treated as "not admin" (fail closed) rather than assumed.
+   * This is the gate for repo-level settings writes (model provider/name,
+   * BYOK credentials, ignore patterns) - a member who can merely see the
+   * repo through an org's "all repositories" install must not be able to
+   * change what it costs or which key it bills.
+   */
+  isAdmin: boolean;
 }
 
 interface GitHubInstallationSummary {
@@ -34,6 +47,13 @@ interface GitHubInstallationSummary {
 interface GitHubRepoSummary {
   id: number;
   full_name: string;
+  permissions?: {
+    admin?: boolean;
+    push?: boolean;
+    pull?: boolean;
+    maintain?: boolean;
+    triage?: boolean;
+  };
 }
 
 async function paginateGitHub<T>(
@@ -115,6 +135,7 @@ export async function listAuthorizedRepositories(
         repositoryId: knownRepo.id,
         githubRepositoryId: repo.id,
         fullName: knownRepo.fullName,
+        isAdmin: repo.permissions?.admin ?? false,
       });
     }
   }

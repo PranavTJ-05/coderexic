@@ -41,6 +41,17 @@ export const workerEnvSchema = baseEnvSchema
       .enum(['true', 'false'])
       .default('false')
       .transform((value) => value === 'true'),
+    /**
+     * Optional, unlike `crypto/env.ts`'s `modelCredentialsEnvSchema` (which
+     * requires it): a deployment that has never configured BYOK must still
+     * boot. When set, `index.ts` calls that schema's own
+     * `loadModelCredentialsConfig` for the actual (eager, validated) master
+     * key parsing - this field only gates whether that call happens at all.
+     * When unset, repo-tier BYOK credential resolution is skipped entirely
+     * at review time (falls straight to the system-configured provider),
+     * logged once at startup rather than silently.
+     */
+    MODEL_CREDENTIALS_MASTER_KEYS: z.string().min(1).optional(),
   })
   .superRefine((data, ctx) => {
     const REQUIRED_KEY: Record<SupportedModelProvider, keyof typeof data> = {

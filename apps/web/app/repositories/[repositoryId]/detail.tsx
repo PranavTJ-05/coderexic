@@ -15,6 +15,7 @@ import {
 
 interface RepositoryResponse {
   repository: RepositoryDetailDto;
+  isAdmin: boolean;
   reviews: ReviewJobSummaryDto[];
   hasMore: boolean;
 }
@@ -66,16 +67,26 @@ export function RepositoryDetail({ repositoryId }: { repositoryId: string }) {
 
   return (
     <main className="flex flex-col gap-6">
-      <div>
-        <PageHeading>{repository.fullName}</PageHeading>
-        <Muted>
-          index: {repository.indexStatus}
-          {repository.settings.modelProvider
-            ? ` - model: ${repository.settings.modelProvider}/${repository.settings.modelName}`
-            : ' - model: default'}
-          {' - minimum severity: '}
-          {repository.settings.minimumSeverity}
-        </Muted>
+      <div className="flex items-start justify-between">
+        <div>
+          <PageHeading>{repository.fullName}</PageHeading>
+          <Muted>
+            index: {repository.indexStatus}
+            {repository.settings.modelProvider
+              ? ` - model: ${repository.settings.modelProvider}/${repository.settings.modelName}`
+              : ' - model: default'}
+            {' - minimum severity: '}
+            {repository.settings.minimumSeverity}
+          </Muted>
+        </div>
+        {data.isAdmin ? (
+          <a
+            href={`/repositories/${repositoryId}/settings`}
+            className="text-sm text-[var(--muted-foreground)] hover:text-[var(--foreground)] hover:underline"
+          >
+            Settings
+          </a>
+        ) : null}
       </div>
 
       <div className="flex flex-col gap-3">

@@ -1,4 +1,5 @@
 import {
+  addIgnorePattern,
   automaticReviewKey,
   completeReview,
   createReviewJob,
@@ -6,15 +7,18 @@ import {
   findUserByGithubId,
   getRepositorySettings,
   IdempotencyConflictError,
+  listIgnorePatterns,
   manualReviewKey,
   markInstallationRemoved,
   markRepositoriesRemoved,
   markWebhookEvent,
   recordWebhookEvent,
+  removeIgnorePattern,
   repositories,
   reviewFindings,
   reviewJobs,
   reviews,
+  updateRepositorySettings,
   upsertInstallation,
   upsertRepository,
   upsertUser,
@@ -136,6 +140,46 @@ describe('store', () => {
         }),
       ).rejects.toThrow('boom');
       expect(await db.select().from(repositories)).toEqual([]);
+    });
+
+    it('updates only the fields given, leaving the rest as is', async () => {
+      const repo = await makeRepository(db);
+      const updated = await updateRepositorySettings(db, repo.id, {
+        modelProvider: 'anthropic',
+        modelName: 'claude-opus-5',
+      });
+      expect(updated).toMatchObject({
+        modelProvider: 'anthropic',
+        modelName: 'claude-opus-5',
+        minimumSeverity: 'low',
+      });
+
+      const severityOnly = await updateRepositorySettings(db, repo.id, {
+        minimumSeverity: 'high',
+      });
+      expect(severityOnly).toMatchObject({
+        modelProvider: 'anthropic',
+        modelName: 'claude-opus-5',
+        minimumSeverity: 'high',
+      });
+    });
+
+    it('clears a repo-level model override back to the deployment default with null', async () => {
+      const repo = await makeRepository(db);
+      await updateRepositorySettings(db, repo.id, { modelProvider: 'gemini' });
+      const cleared = await updateRepositorySettings(db, repo.id, { modelProvider: null });
+      expect(cleared?.modelProvider).toBeNull();
+    });
+
+    it('adds and removes ignore patterns idempotently', async () => {
+      const repo = await makeRepository(db);
+      await addIgnorePattern(db, repo.id, '**/*.generated.ts');
+      await addIgnorePattern(db, repo.id, '**/*.generated.ts'); // duplicate add is a no-op
+      expect(await listIgnorePatterns(db, repo.id)).toEqual(['**/*.generated.ts']);
+
+      await removeIgnorePattern(db, repo.id, '**/*.generated.ts');
+      await removeIgnorePattern(db, repo.id, '**/*.generated.ts'); // duplicate remove is a no-op
+      expect(await listIgnorePatterns(db, repo.id)).toEqual([]);
     });
   });
 

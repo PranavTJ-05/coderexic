@@ -4,6 +4,7 @@ import {
   installations,
   modelCredentials,
   repositories,
+  repositorySettings,
   reviewFindings,
   reviews,
   users,
@@ -184,6 +185,25 @@ describe('schema constraints', () => {
         .set({ indexStatus: 'DONE' as never })
         .where(eq(repositories.id, repo.id));
       expect(await pgErrorCode(bad)).toBe(PG.checkViolation);
+    });
+
+    it('rejects an unsupported repository-level model provider (Phase 13c settings)', async () => {
+      const repo = await makeRepository(db);
+      const bad = db
+        .update(repositorySettings)
+        .set({ modelProvider: 'not-a-real-provider' })
+        .where(eq(repositorySettings.repositoryId, repo.id));
+      expect(await pgErrorCode(bad)).toBe(PG.checkViolation);
+    });
+
+    it('accepts a null repository-level model provider (no override)', async () => {
+      const repo = await makeRepository(db);
+      await expect(
+        db
+          .update(repositorySettings)
+          .set({ modelProvider: null })
+          .where(eq(repositorySettings.repositoryId, repo.id)),
+      ).resolves.toBeDefined();
     });
   });
 

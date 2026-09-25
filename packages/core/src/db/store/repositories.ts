@@ -1,6 +1,12 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import type { Executor } from '../client.js';
-import { ignorePatterns, repositories, repositorySettings } from '../schema.js';
+import {
+  ignorePatterns,
+  repositories,
+  repositorySettings,
+  type MODEL_PROVIDERS_FOR_SETTINGS,
+  type Severity,
+} from '../schema.js';
 
 export type Repository = typeof repositories.$inferSelect;
 export type RepositorySettings = typeof repositorySettings.$inferSelect;
@@ -87,6 +93,34 @@ export async function getRepositorySettings(
   return row;
 }
 
+/**
+ * Partial update of a repository's settings row (Phase 13c's settings
+ * page). Every field is optional so a caller only touches what the user
+ * actually changed - `undefined` means "leave as is", not "clear". Setting
+ * `modelProvider` to `null` clears a repo-level override back to the
+ * deployment default; the DB's own `repository_settings_model_provider_ck`
+ * is the final word on a valid provider name, but the caller (the API
+ * route) should validate against `SUPPORTED_MODEL_PROVIDERS` first for a
+ * clean 400 instead of a raw constraint-violation error.
+ */
+export async function updateRepositorySettings(
+  db: Executor,
+  repositoryId: string,
+  update: {
+    modelProvider?: (typeof MODEL_PROVIDERS_FOR_SETTINGS)[number] | null;
+    modelName?: string | null;
+    minimumSeverity?: Severity;
+  },
+): Promise<RepositorySettings | undefined> {
+  if (Object.keys(update).length === 0) return getRepositorySettings(db, repositoryId);
+  const [row] = await db
+    .update(repositorySettings)
+    .set(update)
+    .where(eq(repositorySettings.repositoryId, repositoryId))
+    .returning();
+  return row;
+}
+
 /** The repo's persistent ignore-glob list (`ignore_patterns`), the DB layer of PRODUCT_SPEC.md §11's config. */
 export async function listIgnorePatterns(db: Executor, repositoryId: string): Promise<string[]> {
   const rows = await db
@@ -94,6 +128,26 @@ export async function listIgnorePatterns(db: Executor, repositoryId: string): Pr
     .from(ignorePatterns)
     .where(eq(ignorePatterns.repositoryId, repositoryId));
   return rows.map((row) => row.pattern);
+}
+
+/** Adds an ignore-glob for a repository; a no-op (not an error) if it's already there. */
+export async function addIgnorePattern(
+  db: Executor,
+  repositoryId: string,
+  pattern: string,
+): Promise<void> {
+  await db.insert(ignorePatterns).values({ repositoryId, pattern }).onConflictDoNothing();
+}
+
+/** Removes an ignore-glob for a repository; a no-op if it wasn't there. */
+export async function removeIgnorePattern(
+  db: Executor,
+  repositoryId: string,
+  pattern: string,
+): Promise<void> {
+  await db
+    .delete(ignorePatterns)
+    .where(and(eq(ignorePatterns.repositoryId, repositoryId), eq(ignorePatterns.pattern, pattern)));
 }
 
 /** Soft-removes repositories deselected from an installation. */

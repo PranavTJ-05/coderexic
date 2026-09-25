@@ -396,6 +396,49 @@ compiles core first, then apps against core's `dist/`.
   `installation_id` query param GitHub may redirect back with) is never
   read or trusted - the dashboard just re-derives authorization from
   `listAuthorizedRepositories` on load, the same as any other visit.
+- **Repo-level writes (settings, BYOK keys, ignore patterns) are gated on
+  GitHub repo *admin*, not just "authorized to see this repo."**
+  `AuthorizedRepository.isAdmin` comes from GitHub's `permissions.admin`
+  (verified against GitHub's OpenAPI spec for this exact endpoint, not
+  assumed); missing `permissions` fails closed to not-admin.
+  `apps/web/src/authorize.ts`'s `requireRepoAdmin` is the one gate every
+  mutating route in `apps/repositories/[repositoryId]/{settings,
+  ignore-patterns,credentials}` shares - a non-admin authorized user still
+  gets a full read (`GET /api/repositories/[id]`), just no write access.
+- **BYOK resolution at review time is repo-tier only - never a `userId`.**
+  `apps/worker/src/review/pipeline.ts`'s `resolveReviewProvider` calls
+  `resolveProviderEntry` (Phase 11, wired in this phase) with only a
+  `repositoryId` - a webhook or `/review review` trigger has no signed-in
+  user to resolve a user-scoped credential for. A resolution failure
+  (e.g. a credential encrypted under a rotated-away master key) fails the
+  review with `errorCode: 'BYOK_CREDENTIAL_ERROR'` and never silently
+  falls back to the deployment's own key - see
+  `ProviderCredentialResolutionError`'s doc comment for why a fallback
+  there would be a real bug (quietly billing the operator), not a
+  convenience.
+- **`MODEL_CREDENTIALS_MASTER_KEYS` is optional in `apps/worker` and
+  `apps/web`, even though `crypto/env.ts`'s own schema requires it** - a
+  deployment that has never configured BYOK must still boot. If you do set
+  it, it must be the *exact same value* in both apps' env (and note: the
+  root `.env` and `apps/web/.env.local` are separate files - see Phase
+  13a's `NEXTAUTH_URL`/`GITHUB_CLIENT_ID` note above for the same trap).
+  Mismatched keys don't fail loudly; they just make every repo-level BYOK
+  credential permanently undecryptable.
+- Provider precedence for a review, in order: `.coderexic.yml`'s `model:`
+  (Phase 10) > `repository_settings.model_provider` (Phase 13c) > the
+  deployment's fixed default - and, orthogonally, whichever provider wins,
+  a repo's own BYOK key for it outranks the deployment's key for it.
+  `repository_settings.model_name` is stored but **not** applied to model
+  selection - `resolveReviewProvider`/`resolveProviderEntry` always use
+  the deployment's configured model name or the provider's default, on
+  purpose (a free-text model name applied against the operator's *system*
+  key would let a repo admin pick the operator's most expensive model).
+- "Review rules" in the settings page means the `ignore_patterns` table
+  (Phase 5 schema, no writer until this phase) - not an editor for
+  `.coderexic.yml`/the repo's rules file, which stays version-controlled
+  in the repository by design (§16). `repository_rules` (Phase 2 schema)
+  is still never written to by anything; don't build a UI that reads it
+  expecting real rows.
 
 ## Commands
 

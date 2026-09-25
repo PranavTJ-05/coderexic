@@ -9,6 +9,7 @@ import {
   type GitHubApp,
   type IndexQueueJob,
   type Logger,
+  type MasterKeyMap,
   type ProviderRegistry,
   type ReviewModel,
   type ReviewQueueJob,
@@ -28,6 +29,15 @@ export interface ReviewWorkerDeps {
   modelName: string;
   /** Every provider this deployment has a key for (ROADMAP.md Phase 10), for a repo's `.coderexic.yml` `model:` override. */
   providers?: ProviderRegistry;
+  /**
+   * When set, a repository's own BYOK credential (Phase 11's
+   * `model_credentials`, repo-scoped rows only - there's no acting user at
+   * review time) is resolved and used ahead of this deployment's own key
+   * for whichever provider the review ends up using (Phase 13c). When
+   * unset, BYOK resolution is skipped entirely and every review uses this
+   * deployment's own configured providers, exactly as before Phase 13c.
+   */
+  masterKeys?: MasterKeyMap;
   concurrency?: number;
   /** How often the stale-job sweep runs. */
   sweepIntervalMs?: number;
@@ -89,6 +99,7 @@ export function createReviewWorker(deps: ReviewWorkerDeps): Worker {
               ...(indexQueue !== undefined && { indexQueue }),
               ...(deps.agentAdapter !== undefined && { agentAdapter: deps.agentAdapter }),
               ...(deps.providers !== undefined && { providers: deps.providers }),
+              ...(deps.masterKeys !== undefined && { masterKeys: deps.masterKeys }),
             },
             job.reviewJobId,
           ),

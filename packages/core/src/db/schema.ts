@@ -54,6 +54,14 @@ export const AGENT_TERMINATION_REASONS = [
 ] as const;
 export const TOOL_CALL_STATUSES = ['SUCCEEDED', 'FAILED', 'REJECTED'] as const;
 export const WEBHOOK_DELIVERY_STATUSES = ['RECEIVED', 'PROCESSED', 'IGNORED', 'FAILED'] as const;
+/**
+ * Duplicated from `config/schema.ts`'s `SUPPORTED_MODEL_PROVIDERS` rather
+ * than imported - that module already imports `SEVERITIES` from this file,
+ * and importing back would be circular. Keep the two lists in sync by
+ * hand; a mismatch only matters if a provider is added or removed, which
+ * already requires touching several other files (ROADMAP.md Phase 10).
+ */
+export const MODEL_PROVIDERS_FOR_SETTINGS = ['gemini', 'openai', 'anthropic', 'groq'] as const;
 
 export type Severity = (typeof SEVERITIES)[number];
 export type FixType = (typeof FIX_TYPES)[number];
@@ -163,6 +171,13 @@ export const repositorySettings = pgTable(
     check(
       'repository_settings_limits_ck',
       sql`${t.maxAgentTurns} > 0 AND ${t.maxFileFetches} >= 0 AND ${t.maxReviewSeconds} > 0`,
+    ),
+    // NULL passes `IN (...)` as NULL, which Postgres CHECK treats as
+    // satisfied - so this only constrains a *set* model_provider, matching
+    // the column's own nullability (no repo-level override is the default).
+    check(
+      'repository_settings_model_provider_ck',
+      oneOf(t.modelProvider, MODEL_PROVIDERS_FOR_SETTINGS),
     ),
   ],
 );

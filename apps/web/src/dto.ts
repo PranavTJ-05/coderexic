@@ -5,8 +5,10 @@
  * to the client just by existing.
  */
 import type {
+  ModelCredentialMetadata,
   Repository,
   RepositorySettings,
+  RepositoryUsageSummary,
   Review,
   ReviewFinding,
   ReviewJob,
@@ -137,6 +139,34 @@ export function toRepositoryDetailDto(
       minimumSeverity: settings?.minimumSeverity ?? 'low',
     },
   };
+}
+
+export interface ModelCredentialDto {
+  id: string;
+  provider: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function toModelCredentialDto(row: ModelCredentialMetadata): ModelCredentialDto {
+  return {
+    id: row.id,
+    provider: row.provider,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+export interface RepositoryUsageDto {
+  reviewCount: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalDurationMs: number;
+  jobCountByStatus: Partial<Record<string, number>>;
+}
+
+export function toRepositoryUsageDto(summary: RepositoryUsageSummary): RepositoryUsageDto {
+  return summary;
 }
 
 export function toReviewFindingDto(finding: ReviewFinding): ReviewFindingDto {

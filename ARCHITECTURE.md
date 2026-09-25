@@ -140,6 +140,57 @@ into folders.
   visual language (Tailwind utilities + `cva` variants + a `cn()` helper)
   by hand instead.
 
+### Decisions made while implementing (Phase 13c)
+- **Repo-level authorization is a GitHub *admin* check
+  (`AuthorizedRepository.isAdmin`), separate from "can see this repo."**
+  `packages/core/src/github/user-access.ts` reads `permissions.admin` off
+  GitHub's repository object (verified against GitHub's own OpenAPI spec
+  that `GET /user/installations/{id}/repositories` returns that field, not
+  assumed from prose) - a member who sees a repo through an org's "all
+  repositories" install must not be able to change what a review costs or
+  which key bills it. `permissions` isn't itself a required field on the
+  shared schema, so its absence is treated as not-admin (fail closed).
+  `apps/web/src/authorize.ts`'s `requireRepoAdmin` is the one gate every
+  settings/BYOK/ignore-pattern write route shares.
+- **BYOK credential resolution lives in the worker, repo-tier only - no
+  `userId` is ever passed.** A review job has a repository and (for a
+  manual trigger) a triggering comment, but no signed-in user - the
+  `resolveProviderEntry` call `apps/worker/src/review/pipeline.ts`'s new
+  `resolveReviewProvider` makes only ever looks up a repo-scoped
+  credential, never a user-scoped one (user-scoped BYOK, built in Phase
+  11, has no consumer yet - it would need an actual "review triggered
+  by/for a specific user" concept this system doesn't have).
+- **A BYOK resolution failure fails the review; it never falls back to the
+  deployment's own key.** Falling back would silently bill the operator
+  instead of honoring the repo admin's explicit choice - the opposite of
+  what BYOK is for. `ProviderCredentialResolutionError` (new, in
+  `packages/core/src/llm/credential-resolution.ts`) is the distinct
+  signal; "no credential configured anywhere for this provider" (not an
+  error - just unconfigured) still falls back with a warning.
+- **`MODEL_CREDENTIALS_MASTER_KEYS` is optional at the app-env level in
+  both `apps/worker` and `apps/web`**, even though Phase 11's own
+  `crypto/env.ts` schema requires it - a deployment that has never
+  configured BYOK must still boot (confirmed true today: the project's own
+  root `.env` doesn't set it). The same value must be set in both apps'
+  env if BYOK is used at all; a mismatch makes every repo-level credential
+  permanently undecryptable, not just newly-written ones.
+- **Model provider precedence gained a middle tier:** `.coderexic.yml`'s
+  `model:` (Phase 10, untrusted repo input) still wins, then
+  `repository_settings.model_provider` (new - the settings page's write,
+  DB-validated by a new CHECK constraint), then the deployment's fixed
+  default. `repository_settings.model_name` is stored but deliberately
+  *not* wired to model selection yet - see ROADMAP.md's "what's still
+  open" for why applying a free-text model name against a system-tier
+  credential would be a privilege-widening bug, not a feature.
+- **One settings page, not four.** The roadmap's original page list
+  (Settings, Model settings, Review rules, Usage) collapses to one route:
+  "model settings" and "usage" are real, DB-backed sections of it, and
+  "review rules" turned out to mean the `ignore_patterns` table (which had
+  schema since Phase 5 but no writer until this phase) rather than an
+  editor for `.coderexic.yml`/the rules file itself - that file is
+  version-controlled in the repository on purpose (§16), so a web form
+  editing it would fight the source of truth instead of complementing it.
+
 ## 5. GitHub integration
 Wrap GitHub in a `GitHubClient` abstraction. Nothing else in the app depends
 on Octokit request details.

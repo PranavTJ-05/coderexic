@@ -29,7 +29,9 @@ import {
   ModelInvalidOutputError,
   ModelTimeoutError,
   placeFindings,
+  ProviderCredentialResolutionError,
   recordAgentToolCall,
+  resolveProviderEntry,
   runAgentLoop,
   ReviewContextCache,
   selectReviewableFiles,
@@ -42,6 +44,7 @@ import {
   type GitHubClient,
   type IndexQueueJob,
   type Logger,
+  type MasterKeyMap,
   type ModelReviewOutput,
   type ParsedRepositoryConfig,
   type PRFile,
@@ -51,7 +54,9 @@ import {
   type RepositoryRulesFile,
   type RepositorySettings,
   type RepoRef,
+  type ResolvedProviderEntry,
   type ReviewModel,
+  type SupportedModelProvider,
 } from '@coderexic/core';
 import type { Queue } from 'bullmq';
 import { publishReview } from './publish.js';
@@ -101,6 +106,23 @@ export interface ReviewPipelineDeps {
    * omit it.
    */
   providers?: ProviderRegistry;
+  /**
+   * When set, a repository's own BYOK credential (Phase 11's
+   * `model_credentials`, repo-tier only - there's no acting user at review
+   * time, so `resolveReviewProvider` below never passes a `userId`) is
+   * resolved for whichever provider the review ends up requesting, ahead
+   * of this deployment's own key for that provider. Unset means BYOK
+   * resolution is skipped outright and every review uses `providers`
+   * (this deployment's own configured registry) exactly as before Phase 13c.
+   */
+  masterKeys?: MasterKeyMap;
+  /**
+   * Test seam: overrides the credential resolver `resolveReviewProvider`
+   * calls when `masterKeys` is set, instead of the real `resolveProviderEntry`
+   * (which builds real provider SDK clients). Production code never sets
+   * this.
+   */
+  resolveProviderEntry?: typeof resolveProviderEntry;
 }
 
 /**
@@ -123,6 +145,32 @@ async function ensureIndexed(
   } catch (err) {
     log.warn({ err }, 'failed to trigger an index run for this repository; continuing the review');
   }
+}
+
+/**
+ * Resolves the actual provider entry (API client + model) for whichever
+ * provider name the review ends up requesting (Phase 13c). Repo-tier BYOK
+ * only - `resolveProviderEntry` never receives a `userId`, since a webhook-
+ * triggered or `/review review`-triggered job has no acting user, only a
+ * repository. `undefined` means "this deployment has no key for this
+ * provider anywhere" (repo BYOK or system) - the caller falls back to the
+ * fixed deployment default and warns; it does not mean "BYOK resolution
+ * failed," which is a `ProviderCredentialResolutionError` instead and
+ * propagates to the caller's own error handling (never silently swallowed
+ * into a fallback - see that error's doc comment).
+ */
+async function resolveReviewProvider(
+  deps: ReviewPipelineDeps,
+  repositoryId: string,
+  provider: SupportedModelProvider,
+  log: Logger,
+): Promise<ResolvedProviderEntry | undefined> {
+  if (!deps.masterKeys) {
+    const systemEntry = deps.providers?.[provider];
+    return systemEntry ? { ...systemEntry, source: 'system' } : undefined;
+  }
+  const resolve = deps.resolveProviderEntry ?? resolveProviderEntry;
+  return resolve(deps.db, { repositoryId, provider }, deps.masterKeys, deps.providers ?? {}, log);
 }
 
 /** Non-error termination reasons stored as review_jobs.error_code. */
@@ -270,16 +318,46 @@ export async function processReviewJob(
       : configuredReviewSeconds;
     const ignoreGlobs = [...dbIgnorePatterns, ...config.ignore];
 
-    // .coderexic.yml's `model:` field is untrusted repo input - an enum only (SUPPORTED_MODEL_PROVIDERS),
-    // never a base URL or model name, so it can only ever pick among providers this deployment already
-    // configured a key for. A repo naming an unconfigured provider falls back to the deployment default
-    // with a warning, same as any other bad config field (PRODUCT_SPEC.md §18).
+    // Provider precedence: .coderexic.yml's `model:` (untrusted repo input,
+    // an enum only - SUPPORTED_MODEL_PROVIDERS, never a base URL or model
+    // name) > repository_settings.model_provider (Phase 13c's settings UI,
+    // DB-validated by repository_settings_model_provider_ck) > this
+    // deployment's fixed default. `settings.modelName` is deliberately
+    // *not* applied here, even when set: resolveReviewProvider already
+    // ignores any custom model name for a repo-tier BYOK credential (it
+    // uses this deployment's configured model or the provider's own
+    // default) precisely so a repo admin can never steer a review onto the
+    // operator's most expensive model using the operator's own system key
+    // - applying a free-text model name against a *system* credential
+    // would defeat that. `modelName` stays stored for a future per-repo
+    // override that's scoped correctly; it's not wired to model selection
+    // yet.
     const configWarnings = [...config.warnings];
-    const resolvedEntry = config.model ? deps.providers?.[config.model] : undefined;
-    if (config.model && !resolvedEntry) {
-      configWarnings.push(
-        `model "${config.model}" is not configured on this deployment; using the default`,
-      );
+    // settings.modelProvider is a DB `text` column (Drizzle types it as
+    // `string | null`), but repository_settings_model_provider_ck (the
+    // migration added alongside `updateRepositorySettings`) enforces it's
+    // one of SUPPORTED_MODEL_PROVIDERS or NULL at write time - safe to
+    // narrow here rather than re-validate a value the DB already validated.
+    const requestedProvider = (config.model ?? settings?.modelProvider ?? undefined) as
+      SupportedModelProvider | undefined;
+    let resolvedEntry: ResolvedProviderEntry | undefined;
+    if (requestedProvider) {
+      try {
+        resolvedEntry = await resolveReviewProvider(deps, repository.id, requestedProvider, log);
+      } catch (err) {
+        if (err instanceof ProviderCredentialResolutionError) {
+          log.error({ err, provider: requestedProvider }, 'BYOK credential resolution failed');
+          await failReviewJob(db, reviewJobId, 'FAILED', 'BYOK_CREDENTIAL_ERROR', err.message);
+          return;
+        }
+        throw err;
+      }
+    }
+    if (requestedProvider && !resolvedEntry) {
+      const origin = config.model
+        ? `.coderexic.yml's model "${config.model}"`
+        : `the repository's configured model "${requestedProvider}"`;
+      configWarnings.push(`${origin} is not configured on this deployment; using the default`);
     }
     const resolvedProvider = resolvedEntry?.provider ?? provider;
     const resolvedModelName = resolvedEntry?.modelName ?? modelName;
