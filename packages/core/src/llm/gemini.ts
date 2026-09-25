@@ -2,6 +2,7 @@ import { FIX_TYPES, SEVERITIES } from '../db/schema.js';
 import type { Logger } from '../logger.js';
 import { callGeminiApi } from './gemini-http.js';
 import { ModelInvalidOutputError } from './errors.js';
+import { DEFAULT_REQUEST_TIMEOUT_MS } from './http-policy.js';
 import { buildReviewPrompt, SYSTEM_PROMPT } from './prompt.js';
 import { modelReviewOutputSchema, type ReviewModel, type ReviewModelInput } from './types.js';
 
@@ -61,7 +62,15 @@ export function createGeminiAdapter({
 }: GeminiAdapterOptions): ReviewModel {
   const log = logger.child({ component: 'gemini', model });
   const url = `${baseUrl}/v1beta/models/${model}:generateContent`;
-  const httpOptions = { apiKey, fetch, baseUrl, logger: log, maxRetries, retryBaseMs };
+  const httpOptions = {
+    apiKey,
+    fetch,
+    baseUrl,
+    logger: log,
+    maxRetries,
+    retryBaseMs,
+    requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+  };
 
   return {
     async generateReview(input: ReviewModelInput, options = {}) {

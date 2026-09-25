@@ -196,6 +196,61 @@ compiles core first, then apps against core's `dist/`.
   (repo-configurable, default 60, sized for one model call) gets a
   `Math.max(configured, 180)` floor on the agent path, since ten turns
   plus tool-call time can exceed the one-shot default easily.
+- Four providers exist behind `AgentAdapter`/`ReviewModel`: Gemini
+  (`llm/gemini.ts`/`gemini-agent.ts`), OpenAI and Groq (both
+  `llm/openai-compatible.ts` - Groq's API is OpenAI-compatible, so
+  `llm/groq.ts` is a thin wrapper around the same adapter OpenAI uses,
+  differing only in `baseUrl`/default model), and Anthropic
+  (`llm/anthropic.ts`, raw HTTP against the Messages API). Every raw-HTTP
+  adapter shares one retry/timeout policy (`llm/http-policy.ts`'s
+  `postJsonWithRetry`): retries on 429/503 (Anthropic also 529), a
+  *per-attempt* timeout (default 60s, `DEFAULT_REQUEST_TIMEOUT_MS`,
+  constructed fresh inside the retry loop, not once outside it - see
+  ROADMAP.md Phase 10) combined with the caller's `AbortSignal` via
+  `AbortSignal.any`, and a thrown `ModelHttpError` that includes only the
+  HTTP status - never the response body, which can echo request secrets
+  back (a provider's 401 body fragmenting the key that was sent).
+- `claude-sonnet-5`/`claude-opus-5` (Anthropic's default, `DEFAULT_ANTHROPIC_MODEL`
+  is `claude-opus-5` per the `claude-api` skill - never downgrade the
+  default without being told to) run adaptive thinking whenever a request
+  omits `thinking`, which `llm/anthropic.ts` always does. Its `providerData`
+  therefore carries the raw response `content` array (echoed back verbatim
+  for a later turn, Gemini's pattern), so a `thinking` block is never
+  silently dropped, and it never sends `tool_choice` at all - forcing a
+  tool is documented as incompatible with extended thinking on these
+  models, so the one-shot composer's text-parsing fallback carries that
+  case instead.
+- Every provider except Gemini gets its one-shot `ReviewModel` (the
+  fallback path when `AGENT_LOOP_ENABLED` is off) for free via
+  `llm/one-shot-from-agent.ts`'s `createOneShotFromAgentAdapter`: one
+  `chat()` call with only the `submit_review` tool and `AgentChatOptions`'
+  new `toolChoice` forcing it, instead of a separate one-shot
+  request-builder per provider. A provider that ignores `toolChoice` (or,
+  like Anthropic, never receives it) falls back to parsing the response as
+  plain text, the same fallback-parsing path `agent/loop.ts` already has.
+- `llm/provider-factory.ts`'s `buildProviderRegistry` only creates an
+  entry for a provider whose API key is actually set
+  (`apps/worker/src/env.ts`'s `workerEnvSchema` makes every per-provider
+  key optional and uses `superRefine` to require only the one
+  `MODEL_PROVIDER` selects - a Groq-only deployment must boot without ever
+  setting `GEMINI_API_KEY`). `ReviewPipelineDeps.providers` lets a repo's
+  `.coderexic.yml` `model:` field (an enum from
+  `config/schema.ts`'s `SUPPORTED_MODEL_PROVIDERS` - never a base URL or
+  model string, since that's untrusted repo input and an arbitrary URL
+  would be an SSRF) pick a *different configured* provider per review,
+  falling back to the deployment default with a config warning when the
+  named provider has no key. That per-repo choice can only swap **which**
+  adapter runs within whichever mode (one-shot or agent-loop) this
+  deployment is already in - it must never itself turn the agent loop on
+  when `AGENT_LOOP_ENABLED` is off; `apps/worker/src/review/pipeline.ts`
+  gates `resolvedAgentAdapter` on `deps.agentAdapter`'s presence first,
+  precisely because an earlier version let any configured provider's
+  `agentAdapter` silently enable agent mode regardless of the flag.
+- `checkProviderHealth` (`llm/provider-factory.ts`) is a single no-token
+  models-list `GET` per provider, run once at worker startup for the
+  selected default (logs a warning on failure, never crashes startup) and
+  reused as-is for Phase 11's "provider-specific credential validation" -
+  a 401/403 there means the key itself is bad, not a transient outage.
 
 ## Commands
 

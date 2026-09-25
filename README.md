@@ -7,17 +7,20 @@ consults a dependency graph of the repository (what the changed files
 import and what depends on them), lets an AI agent fetch the related code
 it needs, and posts validated findings as inline review comments.
 
-> **Status:** Phase 9 (agent loop). Opening a pull request queues a review
-> job. By default the worker sends Gemini a one-shot prompt (the diff plus
-> repo rules) and posts findings as an inline GitHub review, shaped by each
-> repo's own `.coderexic.yml`/`.verix.yml` and rules file (loaded from the
-> PR's base commit). Set `AGENT_LOOP_ENABLED=true` and it instead runs a
-> tool-calling agent loop: the model decides for itself when to call
-> `get_imports`, `get_dependents` and `get_file_content` (Phase 8) before
-> ending with `submit_review`, using Phase 7's ranked related-file list as
-> a starting point rather than everything being inlined for it up front.
-> Off by default - it makes far more model calls per review, and it's new.
-> A push also queues an incremental dependency-graph index
+> **Status:** Phase 10 (multi-provider models). Opening a pull request
+> queues a review job. `MODEL_PROVIDER` picks which of Gemini, OpenAI,
+> Anthropic or Groq actually runs it (only that provider's API key needs to
+> be set); a repo's own `.coderexic.yml` can pick a different *configured*
+> provider per review. By default the worker sends a one-shot prompt (the
+> diff plus repo rules) and posts findings as an inline GitHub review,
+> shaped by each repo's own `.coderexic.yml`/`.verix.yml` and rules file
+> (loaded from the PR's base commit). Set `AGENT_LOOP_ENABLED=true` and it
+> instead runs a tool-calling agent loop: the model decides for itself when
+> to call `get_imports`, `get_dependents` and `get_file_content` (Phase 8)
+> before ending with `submit_review`, using Phase 7's ranked related-file
+> list as a starting point rather than everything being inlined for it up
+> front. Off by default - it makes far more model calls per review, and
+> it's new. A push also queues an incremental dependency-graph index
 > (TypeScript/JavaScript/Python/Go/Rust/Java/Ruby import resolution,
 > forward and reverse edges); if a review's repository isn't indexed at the
 > PR's base commit yet, the review pipeline kicks off an index run itself

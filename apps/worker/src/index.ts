@@ -1,12 +1,12 @@
 import {
+  buildProviderRegistry,
+  checkProviderHealth,
   createDatabase,
-  createGeminiAdapter,
-  createGeminiAgentAdapter,
   createGitHubApp,
   createLogger,
   createRedisConnection,
-  loadGeminiEnv,
   loadGitHubAppCredentials,
+  type ProviderCredentials,
 } from '@coderexic/core';
 import { loadWorkerEnv } from './env.js';
 import { createIndexWorker } from './index-run/worker.js';
@@ -23,34 +23,67 @@ const githubApp = createGitHubApp({
   }),
   logger,
 });
-const geminiEnv = loadGeminiEnv(process.env);
-const model = createGeminiAdapter({
-  apiKey: geminiEnv.GEMINI_API_KEY,
-  model: geminiEnv.GEMINI_MODEL,
-  logger,
+
+// Only providers with a key actually set get an entry (ROADMAP.md Phase 10's provider
+// factory) - a Groq-only deployment never touches GEMINI_API_KEY, and env.ts's superRefine
+// already guarantees MODEL_PROVIDER's own key is present.
+const credentials: ProviderCredentials = {
+  ...(env.GEMINI_API_KEY && {
+    gemini: { apiKey: env.GEMINI_API_KEY, model: env.GEMINI_MODEL ?? 'gemini-3.6-flash' },
+  }),
+  ...(env.OPENAI_API_KEY && {
+    openai: { apiKey: env.OPENAI_API_KEY, model: env.OPENAI_MODEL ?? 'gpt-5.1' },
+  }),
+  ...(env.ANTHROPIC_API_KEY && {
+    anthropic: { apiKey: env.ANTHROPIC_API_KEY, model: env.ANTHROPIC_MODEL ?? 'claude-sonnet-5' },
+  }),
+  ...(env.GROQ_API_KEY && {
+    groq: { apiKey: env.GROQ_API_KEY, model: env.GROQ_MODEL ?? 'openai/gpt-oss-20b' },
+  }),
+};
+const providers = buildProviderRegistry(credentials, logger);
+const defaultCredential = credentials[env.MODEL_PROVIDER];
+const defaultEntry = providers[env.MODEL_PROVIDER];
+if (!defaultEntry || !defaultCredential) {
+  // env.ts's superRefine should make this unreachable; fail loudly rather than silently
+  // falling back to some other provider if it ever is.
+  logger.fatal(
+    { provider: env.MODEL_PROVIDER },
+    'selected MODEL_PROVIDER has no credential configured',
+  );
+  process.exit(1);
+}
+
+// A no-token models-list call; never blocks startup on a transient failure.
+await checkProviderHealth(defaultEntry.provider, defaultCredential).then((health) => {
+  if (!health.ok) {
+    logger.warn(
+      { provider: health.provider, error: health.error },
+      'provider health check failed at startup',
+    );
+  }
 });
+
 // Off by default (ROADMAP.md Phase 9): the agent loop makes many more model
-// calls per review than the one-shot path above, which stays wired in as
-// the fallback whenever this flag is off.
-const agentAdapter = env.AGENT_LOOP_ENABLED
-  ? createGeminiAgentAdapter({
-      apiKey: geminiEnv.GEMINI_API_KEY,
-      model: geminiEnv.GEMINI_MODEL,
-      logger,
-    })
-  : undefined;
-if (env.AGENT_LOOP_ENABLED)
-  logger.info('AGENT_LOOP_ENABLED: reviews will run through the agent loop');
+// calls per review than the one-shot path, which stays wired in as the
+// fallback whenever this flag is off.
+if (env.AGENT_LOOP_ENABLED) {
+  logger.info(
+    { provider: defaultEntry.provider },
+    'AGENT_LOOP_ENABLED: reviews will run through the agent loop',
+  );
+}
 
 const worker = createReviewWorker({
   logger,
   db: database.db,
   connection: redis,
   githubApp,
-  model,
-  ...(agentAdapter && { agentAdapter }),
-  provider: 'gemini',
-  modelName: geminiEnv.GEMINI_MODEL,
+  model: defaultEntry.reviewModel,
+  ...(env.AGENT_LOOP_ENABLED && { agentAdapter: defaultEntry.agentAdapter }),
+  provider: defaultEntry.provider,
+  modelName: defaultEntry.modelName,
+  providers,
   concurrency: env.REVIEW_CONCURRENCY,
 });
 
