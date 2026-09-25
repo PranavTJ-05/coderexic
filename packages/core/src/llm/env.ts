@@ -24,7 +24,9 @@ export function loadOpenAIEnv(source?: Record<string, string | undefined>): Open
 
 export const anthropicEnvSchema = z.object({
   ANTHROPIC_API_KEY: z.string().min(1),
-  ANTHROPIC_MODEL: z.string().min(1).default('claude-sonnet-5'),
+  // Kept in sync with anthropic.ts's DEFAULT_ANTHROPIC_MODEL by hand (that
+  // file can't import from here without a cycle: env.ts -> ../env.js).
+  ANTHROPIC_MODEL: z.string().min(1).default('claude-opus-5'),
 });
 export type AnthropicEnv = z.infer<typeof anthropicEnvSchema>;
 

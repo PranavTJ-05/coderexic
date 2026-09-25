@@ -35,7 +35,7 @@ const credentials: ProviderCredentials = {
     openai: { apiKey: env.OPENAI_API_KEY, model: env.OPENAI_MODEL ?? 'gpt-5.1' },
   }),
   ...(env.ANTHROPIC_API_KEY && {
-    anthropic: { apiKey: env.ANTHROPIC_API_KEY, model: env.ANTHROPIC_MODEL ?? 'claude-sonnet-5' },
+    anthropic: { apiKey: env.ANTHROPIC_API_KEY, model: env.ANTHROPIC_MODEL ?? 'claude-opus-5' },
   }),
   ...(env.GROQ_API_KEY && {
     groq: { apiKey: env.GROQ_API_KEY, model: env.GROQ_MODEL ?? 'openai/gpt-oss-20b' },
