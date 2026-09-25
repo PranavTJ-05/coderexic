@@ -7,3 +7,4 @@ export * from './store/review-jobs.js';
 export * from './store/webhook-events.js';
 export * from './store/graph.js';
 export * from './store/agent-runs.js';
+export * from './store/model-credentials.js';

@@ -17,6 +17,11 @@ const SECRET_KEYS = [
   'clientSecret',
   'webhookSecret',
   'encryptionKey',
+  'encryptedSecret',
+  'encrypted_secret',
+  'plaintext',
+  'masterKey',
+  'master_key',
 ];
 
 const CENSOR = '[REDACTED]';

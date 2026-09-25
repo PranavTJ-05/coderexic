@@ -9,3 +9,4 @@ export * from './config/index.js';
 export * from './graph/index.js';
 export * from './context/index.js';
 export * from './agent/index.js';
+export * from './crypto/index.js';

@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "model_credentials_live_repo_unique_idx" ON "model_credentials" USING btree ("repository_id","provider") WHERE "model_credentials"."repository_id" is not null and "model_credentials"."deleted_at" is null;
