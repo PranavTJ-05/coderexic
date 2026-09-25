@@ -1,6 +1,7 @@
 import {
   createDatabase,
   createGeminiAdapter,
+  createGeminiAgentAdapter,
   createGitHubApp,
   createLogger,
   createRedisConnection,
@@ -28,6 +29,18 @@ const model = createGeminiAdapter({
   model: geminiEnv.GEMINI_MODEL,
   logger,
 });
+// Off by default (ROADMAP.md Phase 9): the agent loop makes many more model
+// calls per review than the one-shot path above, which stays wired in as
+// the fallback whenever this flag is off.
+const agentAdapter = env.AGENT_LOOP_ENABLED
+  ? createGeminiAgentAdapter({
+      apiKey: geminiEnv.GEMINI_API_KEY,
+      model: geminiEnv.GEMINI_MODEL,
+      logger,
+    })
+  : undefined;
+if (env.AGENT_LOOP_ENABLED)
+  logger.info('AGENT_LOOP_ENABLED: reviews will run through the agent loop');
 
 const worker = createReviewWorker({
   logger,
@@ -35,6 +48,7 @@ const worker = createReviewWorker({
   connection: redis,
   githubApp,
   model,
+  ...(agentAdapter && { agentAdapter }),
   provider: 'gemini',
   modelName: geminiEnv.GEMINI_MODEL,
   concurrency: env.REVIEW_CONCURRENCY,

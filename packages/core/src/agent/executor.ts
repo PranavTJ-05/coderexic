@@ -10,7 +10,7 @@ import { EMPTY_TS_ALIASES, type TsAliasConfig } from '../graph/tsconfig.js';
 import type { GitHubClient, RepoRef } from '../github/types.js';
 import { modelReviewOutputSchema, type ModelReviewOutput } from '../llm/types.js';
 import { isValidToolPath } from './path-validation.js';
-import type { ToolExecutionResult } from './types.js';
+import type { ToolExecutionResult, ToolExecutor } from './types.js';
 
 const MAX_FILE_BYTES = 512 * 1024;
 const DEFAULT_MAX_TOOL_RESULT_BYTES = 32 * 1024;
@@ -51,7 +51,7 @@ export interface ToolExecutorOptions {
  * repository, only a path within the one this executor was built for
  * (ARCHITECTURE.md §14).
  */
-export class AgentToolExecutor {
+export class AgentToolExecutor implements ToolExecutor {
   private readonly deps: ToolExecutorOptions;
   private readonly changedPaths: ReadonlySet<string>;
   private readonly cache: ReviewContextCache;
@@ -87,21 +87,32 @@ export class AgentToolExecutor {
   async execute(toolName: string, argsJson: unknown): Promise<ToolExecutionResult> {
     const args = typeof argsJson === 'string' ? tryParseJson(argsJson) : argsJson;
     if (args === PARSE_FAILED) {
-      return { text: 'Invalid arguments: not valid JSON.' };
+      return { text: 'Invalid arguments: not valid JSON.', status: 'REJECTED' };
     }
     let outcome: DispatchOutcome;
     try {
       outcome = await withTimeout(this.dispatch(toolName, args), this.toolTimeoutMs);
     } catch (err) {
       if (err instanceof ToolTimeoutError) {
-        return { text: `Tool "${toolName}" timed out and was aborted. You may retry.` };
+        return {
+          text: `Tool "${toolName}" timed out and was aborted. You may retry.`,
+          status: 'FAILED',
+        };
       }
       // The raw error (a DB error can include SQL/params) never reaches the model - only a
       // generic message does, since a tool result can end up quoted back in the posted review.
-      return { text: `Tool "${toolName}" failed unexpectedly. Continue without it.` };
+      return {
+        text: `Tool "${toolName}" failed unexpectedly. Continue without it.`,
+        status: 'FAILED',
+      };
     }
     if (outcome.deliveredPath) this.deliveredFiles.add(outcome.deliveredPath);
     return outcome.result;
+  }
+
+  /** Distinct files actually delivered to the model this review, for AI_AGENT_SPEC.md §9's MAX_FILE_FETCHES. */
+  get deliveredFileCount(): number {
+    return this.deliveredFiles.size;
   }
 
   private dispatch(toolName: string, args: unknown): Promise<DispatchOutcome> {
@@ -115,52 +126,80 @@ export class AgentToolExecutor {
       case 'submit_review':
         return Promise.resolve({ result: this.submitReview(args) });
       default:
-        return Promise.resolve({ result: { text: `Unknown tool "${toolName}".` } });
+        return Promise.resolve({
+          result: { text: `Unknown tool "${toolName}".`, status: 'REJECTED' },
+        });
     }
   }
 
   private async getFileContent(argsJson: unknown): Promise<DispatchOutcome> {
     const path = this.parsePath(argsJson);
-    if (typeof path !== 'string') return { result: { text: path.text } };
+    if (typeof path !== 'string') return { result: { text: path.text, status: 'REJECTED' } };
 
     if (this.deliveredFiles.has(path)) {
-      return { result: { text: ALREADY_FETCHED_MESSAGE } };
+      return { result: { text: ALREADY_FETCHED_MESSAGE, status: 'REJECTED' } };
     }
     const fetched = await this.fetchContent(path);
     if (fetched.failed) {
-      return { result: { text: `Failed to fetch ${path} (temporary error). You may retry.` } };
+      return {
+        result: {
+          text: `Failed to fetch ${path} (temporary error). You may retry.`,
+          status: 'FAILED',
+        },
+      };
     }
-    if (fetched.unavailable)
-      return { result: { text: `${path} is unavailable: ${fetched.unavailable}` } };
-    if (fetched.content === null) return { result: { text: `File not found: ${path}` } };
+    if (fetched.unavailable) {
+      return {
+        result: { text: `${path} is unavailable: ${fetched.unavailable}`, status: 'SUCCEEDED' },
+      };
+    }
+    if (fetched.content === null) {
+      return { result: { text: `File not found: ${path}`, status: 'SUCCEEDED' } };
+    }
     return {
-      result: { text: fenceContent(path, this.truncateContent(path, fetched.content)) },
+      result: {
+        text: fenceContent(path, this.truncateContent(path, fetched.content)),
+        status: 'SUCCEEDED',
+      },
       deliveredPath: path,
     };
   }
 
   private async getImports(argsJson: unknown): Promise<DispatchOutcome> {
     const path = this.parsePath(argsJson);
-    if (typeof path !== 'string') return { result: { text: path.text } };
+    if (typeof path !== 'string') return { result: { text: path.text, status: 'REJECTED' } };
 
     const cacheKey = `imports:${path}`;
     const cached = this.cache.getQuery(cacheKey);
-    if (typeof cached === 'string') return { result: { text: cached } };
+    if (typeof cached === 'string') return { result: { text: cached, status: 'SUCCEEDED' } };
 
     const extractor = extractorFor(path);
     if (!extractor) {
       return {
-        result: { text: `${path}: import extraction is not supported for this file type.` },
+        result: {
+          text: `${path}: import extraction is not supported for this file type.`,
+          status: 'SUCCEEDED',
+        },
       };
     }
 
     const fetched = await this.fetchContent(path);
     if (fetched.failed) {
-      return { result: { text: `Failed to fetch ${path} (temporary error). You may retry.` } };
+      return {
+        result: {
+          text: `Failed to fetch ${path} (temporary error). You may retry.`,
+          status: 'FAILED',
+        },
+      };
     }
-    if (fetched.unavailable)
-      return { result: { text: `${path} is unavailable: ${fetched.unavailable}` } };
-    if (fetched.content === null) return { result: { text: `File not found: ${path}` } };
+    if (fetched.unavailable) {
+      return {
+        result: { text: `${path} is unavailable: ${fetched.unavailable}`, status: 'SUCCEEDED' },
+      };
+    }
+    if (fetched.content === null) {
+      return { result: { text: `File not found: ${path}`, status: 'SUCCEEDED' } };
+    }
 
     const [allFiles, tsAliases, goModule] = await Promise.all([
       this.loadAllFiles(),
@@ -174,16 +213,16 @@ export class AgentToolExecutor {
         : `${path} imports:\n${edges.map((e) => `- ${e.targetPath}`).join('\n')}`;
     const truncated = this.truncate(path, text);
     this.cache.setQuery(cacheKey, truncated);
-    return { result: { text: truncated } };
+    return { result: { text: truncated, status: 'SUCCEEDED' } };
   }
 
   private async getDependents(argsJson: unknown): Promise<DispatchOutcome> {
     const path = this.parsePath(argsJson);
-    if (typeof path !== 'string') return { result: { text: path.text } };
+    if (typeof path !== 'string') return { result: { text: path.text, status: 'REJECTED' } };
 
     const cacheKey = `dependents:${path}`;
     const cached = this.cache.getQuery(cacheKey);
-    if (typeof cached === 'string') return { result: { text: cached } };
+    if (typeof cached === 'string') return { result: { text: cached, status: 'SUCCEEDED' } };
 
     const edges = await getReverseEdges(this.deps.db, this.deps.repositoryId, path);
     const text =
@@ -192,7 +231,7 @@ export class AgentToolExecutor {
         : `Files that depend on ${path}:\n${edges.map((e) => `- ${e.sourcePath}`).join('\n')}`;
     const truncated = this.truncate(path, text);
     this.cache.setQuery(cacheKey, truncated);
-    return { result: { text: truncated } };
+    return { result: { text: truncated, status: 'SUCCEEDED' } };
   }
 
   /**
@@ -208,6 +247,7 @@ export class AgentToolExecutor {
     if (!parsed.success) {
       return {
         text: `submit_review arguments were invalid: ${parsed.error.issues.map((i) => i.message).join('; ')}. Fix and call submit_review again.`,
+        status: 'REJECTED',
       };
     }
     const output: ModelReviewOutput = parsed.data;
@@ -216,9 +256,10 @@ export class AgentToolExecutor {
       const names = [...new Set(offPath.map((r) => r.filename))].join(', ');
       return {
         text: `submit_review rejected: findings reference files not in this PR's changed files (${names}). Only report findings on changed files. Call submit_review again.`,
+        status: 'REJECTED',
       };
     }
-    return { text: 'Review submitted.', done: true, output };
+    return { text: 'Review submitted.', done: true, output, status: 'SUCCEEDED' };
   }
 
   private parsePath(argsJson: unknown): string | { text: string } {

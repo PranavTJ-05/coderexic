@@ -304,19 +304,116 @@ this phase - verified by integration tests only.
 
 ## Phase 9: Agent loop
 **Goal:** the model decides what context it needs.
-- [ ] System prompt
-- [ ] Tool-call loop
-- [ ] Max turns
-- [ ] Max file fetches
-- [ ] Wall-clock timeout
-- [ ] Cancellation
-- [ ] Malformed tool-call handling
-- [ ] Structured submission
-- [ ] Fallback parsing
-- [ ] Agent run persistence
+- [x] System prompt - `agent/prompt.ts`'s `AGENT_SYSTEM_PROMPT` (AI_AGENT_SPEC.md
+      §7, filled in with Phase 8's four tools) plus `buildAgentPrompt`, the
+      loop's first user message: PR metadata, fenced repo rules (reusing
+      `llm/prompt.ts`'s `escapeRulesFence`), the diff, and Phase 7's ranked
+      related-file list as *paths and tiers only* - the agent fetches
+      content itself, rather than the list being inlined for it.
+- [x] Tool-call loop - `agent/loop.ts`'s `runAgentLoop`, following §9's
+      pseudocode: `chat` -> if `submit_review` succeeded, stop; if no tool
+      calls, attempt fallback parsing (below) or terminate; otherwise
+      answer every tool call in the turn (even ones after a `submit_review`
+      in the same batch) before checking whether any of them submitted.
+- [x] Max turns - default 10, configurable. The loop's last turn appends an
+      explicit "submit now" instruction before calling the model, so a run
+      close to the limit doesn't waste it still investigating.
+- [x] Max file fetches - default 12. Past the limit, `get_file_content` is
+      rejected with a "stop investigating, submit now" message *without*
+      dispatching to the executor, rather than ending the run outright -
+      that would throw away the whole investigation. `MAX_FILE_FETCHES` is
+      only recorded as the termination reason if the run then ends without
+      a submission (a `MAX_TURNS`/`INVALID_OUTPUT` that happened to follow
+      a limit hit is reclassified; a `TIMEOUT`/`MODEL_ERROR` is not, since
+      those aren't really about the fetch limit).
+- [x] Wall-clock timeout - `deadlineMs`, combined with any caller-supplied
+      `AbortSignal` via `AbortSignal.any`. AI_AGENT_SPEC.md §14: "a timeout
+      must never leave the review marked successful" - `agent_runs`/
+      `reviews`/`review_jobs` all land on `TIMED_OUT`, never `SUCCEEDED`.
+- [~] Cancellation - the loop accepts and checks an external `AbortSignal`
+      (unit-tested), but nothing in the pipeline actually supplies one yet:
+      neither `worker.stop()` nor a superseded PR aborts an in-flight run.
+      That wiring is unbuilt.
+- [x] Malformed tool-call handling - invalid JSON args, a bad/absent path,
+      and unknown tool names are all rejected by the executor (Phase 8)
+      without crashing the loop. A tool call with **no `args` at all**
+      (Gemini can omit it) is stored as `{}` in `agent_tool_calls.arguments_json`
+      (a NOT NULL jsonb column) rather than crashing the insert - a bug
+      caught by the advisor after the first pass, since it would otherwise
+      have left `reviews`/`agent_runs` rows stuck `RUNNING` forever.
+      `runAgentBranch` also wraps its whole body in try/catch now, so *any*
+      unexpected error (a DB error mid-loop, not just this one) finalizes
+      both rows as `FAILED` instead of leaving them stuck.
+- [x] Structured submission - `submit_review`'s validated `ModelReviewOutput`
+      flows back through `ToolExecutionResult.output`, not just a done flag.
+- [x] Fallback parsing - AI_AGENT_SPEC.md §9's fallback (distinct from §15's
+      "fallback mode" below): a turn with no tool calls has its text
+      stripped of a ```json fence and parsed, then routed through the same
+      `submit_review` schema/changed-file validation as a real tool call.
+      Failure - unparseable, or rejected by that validation - terminates
+      the run immediately with `INVALID_OUTPUT`, per §9 ("otherwise
+      terminate"), rather than giving the model another turn.
+- [x] Agent run persistence - `db/store/agent-runs.ts`: `startReview` (the
+      `reviews` row an agent run needs to exist before the loop finishes),
+      `createAgentRun`, `recordAgentToolCall` (metadata only - never the
+      tool result text or fetched file content, DATA_MODEL.md), and
+      `completeAgentRun`. Not separately unit-tested; exercised through the
+      pipeline integration tests below, which assert on the actual rows.
+
+**Not done, despite being adjacent to this phase's scope:**
+- AI_AGENT_SPEC.md §15's "fallback mode" (a one-shot prompt with
+  *preselected* related context, for a provider that can't do tool
+  calling) is **not** met by Phase 4's existing one-shot path: that path
+  never calls the context engine at all. Phase 9's own fallback *parsing*
+  (above) is a different thing - don't conflate the two.
+- §17's context token budget: `context/budget.ts`'s `TokenBudget` and
+  `truncateToTokens` still have no caller. Phase 7's ROADMAP entry said
+  Phase 8/9 would consume them; neither did. Actually wiring them means
+  budgeting the initial prompt and truncating tool results against what's
+  left, which hasn't been built.
+- A per-repo way to configure agent-loop limits (turns, file fetches,
+  timeout) doesn't exist; only construction-time overrides for tests do.
+
+**Wiring into the real worker (`apps/worker/src/index.ts`):** gated behind
+a new `AGENT_LOOP_ENABLED` env var, **off by default** - the agent loop
+makes far more model calls per review than the one-shot path, and this is
+its first real-world exposure. `apps/worker/src/env.ts` parses it as an
+explicit `'true'`/`'false'` enum, not `z.coerce.boolean()` (which would
+treat the *string* `"false"` as truthy - a real bug caught by its own unit
+test). With the flag off, `processReviewJob` behaves exactly as it did
+before this phase. `maxReviewSeconds` (repo-configurable, default 60,
+sized for one model call) gets a taller floor on the agent path -
+`Math.max(configured, 180)` - since ten turns plus tool-call time can
+easily exceed the one-shot default; a repo that explicitly configures
+something larger than 180s still wins.
 
 **Done when:** the agent goes diff → get_imports → get_dependents →
-get_file_content → submit_review with no human intervention.
+get_file_content → submit_review with no human intervention. Done, but
+**only when `AGENT_LOOP_ENABLED=true`** - that's not the production default
+yet. Verified by 3 new unit test files (loop, prompt, the Gemini agent
+adapter's request/response translation; 26 tests) plus an env-parsing test
+(4 tests) and a dedicated integration test file
+(`tests/integration/agent-review-pipeline.test.ts`, 4 tests against a real
+Postgres agent-run/tool-call trail) covering: the full scripted
+diff→get_imports→get_dependents→get_file_content→submit_review path with
+tool-call rows asserted in order, `MAX_TURNS` exhaustion, a malformed
+(missing-`args`) tool call surviving instead of crashing the job, and a
+real `TIMED_OUT` outcome across `review_jobs`/`reviews`/`agent_runs`.
+
+**Live verification:** attempted against the real Gemini function-calling
+API and the real installed `PranavTJ-05/throwaway-test-repo` (freshly
+re-indexed: 23 files seen, 7 indexed, matching Phase 6/7's earlier live
+runs). Turn 1 succeeded for real - the model called `get_file_content` on
+`app/layout.tsx`, the executor fetched and fenced the real file content,
+and the result round-tripped back to Gemini correctly. Turn 2 onward was
+blocked by the API key's free-tier rate limit (repeated 429s that outlasted
+several retries and waits, consistent with a daily quota rather than a
+per-minute one) before it could exercise the later turns or the
+final-turn/multi-tool-response translation live. The Gemini agent
+adapter's request/response translation (tool declarations, multi-turn
+history, batched `functionResponse` turns, the nullable-schema conversion)
+is otherwise verified by unit tests against a fake `fetch` only, not a real
+multi-turn conversation end to end.
 
 ## Phase 10: Multi-provider models
 **Goal:** providers are interchangeable.

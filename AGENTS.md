@@ -155,8 +155,47 @@ compiles core first, then apps against core's `dist/`.
   same trick as `llm/prompt.ts`'s rules fence) - content is truncated to
   `maxToolResultBytes` **before** fencing, not after, so a result over the
   limit still closes its fence rather than reaching the model unclosed.
-  Nothing calls `AgentToolExecutor` yet; wiring it into an actual
-  tool-call loop is Phase 9.
+- The agent loop (`packages/core/src/agent/loop.ts`'s `runAgentLoop`)
+  drives `AgentToolExecutor` through AI_AGENT_SPEC.md §9's turns:
+  `chat` -> if `submit_review` succeeded, stop; if no tool calls, try
+  fallback-parsing the text as a review (§9, not §15 - see below) or
+  terminate; otherwise answer *every* tool call in the batch, even one
+  after a `submit_review` in the same turn, before checking whether any
+  of them finished the run. Past `maxFileFetches`, a `get_file_content`
+  call is rejected with a "submit now" message without ever reaching the
+  executor - ending the run outright there would throw away the whole
+  investigation - and `MAX_FILE_FETCHES` only becomes the termination
+  reason if the run then ends without a submission. The wall-clock
+  deadline and any caller-supplied `AbortSignal` are combined via
+  `AbortSignal.any`; either one aborting maps to `TIMEOUT`, since the
+  `agent_runs.termination_reason` enum (DATA_MODEL.md) has no separate
+  "cancelled" value.
+- `AgentAdapter`/`ToolExecutor` (`agent/types.ts`) are interfaces, not the
+  concrete `AgentToolExecutor` class, specifically so `runAgentLoop` can be
+  unit-tested with a fake of each and no database or provider SDK at all.
+  A `ToolCall.id` is always present even though Gemini's function calls
+  don't carry one - its adapter (`llm/gemini-agent.ts`) synthesizes one.
+- `db/store/agent-runs.ts` persists one `agent_runs` row per loop and one
+  `agent_tool_calls` row per call (metadata only - never the tool result
+  text or fetched file content, DATA_MODEL.md). `runAgentBranch`
+  (`apps/worker/src/review/pipeline.ts`) wraps the whole loop in a
+  try/catch: any crash - a malformed tool call, a DB error mid-loop -
+  finalizes both rows as `FAILED` rather than leaving them stuck
+  `RUNNING` forever. This includes storing `{}` for a tool call with no
+  `args` at all (Gemini can omit it), since `arguments_json` is a NOT
+  NULL jsonb column and a bare insert of `undefined` would otherwise
+  crash the whole review.
+- The agent loop is wired into the real worker behind `AGENT_LOOP_ENABLED`
+  (`apps/worker/src/env.ts`), **off by default**. It's parsed as an
+  explicit `z.enum(['true', 'false'])` + transform, not
+  `z.coerce.boolean()`, which would treat the *string* `"false"` as
+  truthy. With the flag off, `processReviewJob` runs exactly the Phase
+  4 one-shot path it always has; AI_AGENT_SPEC.md §15's "fallback mode"
+  is not met by that path, since it never calls the context engine for
+  preselected related content - don't conflate the two. `maxReviewSeconds`
+  (repo-configurable, default 60, sized for one model call) gets a
+  `Math.max(configured, 180)` floor on the agent path, since ten turns
+  plus tool-call time can exceed the one-shot default easily.
 
 ## Commands
 

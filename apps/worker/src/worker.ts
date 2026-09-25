@@ -4,6 +4,7 @@ import {
   createReviewQueueWorker,
   enqueueReviewJob,
   findStalePendingReviewJobs,
+  type AgentAdapter,
   type Database,
   type GitHubApp,
   type IndexQueueJob,
@@ -20,6 +21,8 @@ export interface ReviewWorkerDeps {
   connection: ConnectionOptions;
   githubApp: GitHubApp;
   model: ReviewModel;
+  /** When set, reviews run through the Phase 9 agent loop instead of the one-shot `model` path. */
+  agentAdapter?: AgentAdapter;
   provider: string;
   modelName: string;
   concurrency?: number;
@@ -81,6 +84,7 @@ export function createReviewWorker(deps: ReviewWorkerDeps): Worker {
               modelName: deps.modelName,
               logger: deps.logger,
               ...(indexQueue !== undefined && { indexQueue }),
+              ...(deps.agentAdapter !== undefined && { agentAdapter: deps.agentAdapter }),
             },
             job.reviewJobId,
           ),

@@ -7,23 +7,21 @@ consults a dependency graph of the repository (what the changed files
 import and what depends on them), lets an AI agent fetch the related code
 it needs, and posts validated findings as inline review comments.
 
-> **Status:** Phase 8 (agent tools). Opening a pull request queues a review
-> job; the worker asks Gemini for findings on the diff and posts them as an
-> inline GitHub review, shaped by each repo's own
-> `.coderexic.yml`/`.verix.yml` and rules file (loaded from the PR's base
-> commit). A push now also queues an incremental dependency-graph index
+> **Status:** Phase 9 (agent loop). Opening a pull request queues a review
+> job. By default the worker sends Gemini a one-shot prompt (the diff plus
+> repo rules) and posts findings as an inline GitHub review, shaped by each
+> repo's own `.coderexic.yml`/`.verix.yml` and rules file (loaded from the
+> PR's base commit). Set `AGENT_LOOP_ENABLED=true` and it instead runs a
+> tool-calling agent loop: the model decides for itself when to call
+> `get_imports`, `get_dependents` and `get_file_content` (Phase 8) before
+> ending with `submit_review`, using Phase 7's ranked related-file list as
+> a starting point rather than everything being inlined for it up front.
+> Off by default - it makes far more model calls per review, and it's new.
+> A push also queues an incremental dependency-graph index
 > (TypeScript/JavaScript/Python/Go/Rust/Java/Ruby import resolution,
 > forward and reverse edges); if a review's repository isn't indexed at the
 > PR's base commit yet, the review pipeline kicks off an index run itself
-> rather than waiting for the next push. `buildReviewContext`
-> (`packages/core/src/context`) can now answer what a changed file imports,
-> what depends on it, and which related test files exist, ranked into
-> tiers and capped by file size/count, and `AgentToolExecutor`
-> (`packages/core/src/agent`) can now execute the four tools an agent loop
-> will call (`get_file_content`, `get_imports`, `get_dependents`,
-> `submit_review`) against one review's repo/commit - but nothing calls
-> either one yet; wiring them into an actual tool-call loop is Phase 9. See
-> [ROADMAP.md](ROADMAP.md).
+> rather than waiting for the next push. See [ROADMAP.md](ROADMAP.md).
 
 ## Requirements
 
