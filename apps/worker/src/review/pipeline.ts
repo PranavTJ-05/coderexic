@@ -1,8 +1,14 @@
 import {
+  AGENT_SYSTEM_PROMPT,
+  AgentToolExecutor,
+  buildAgentPrompt,
   buildReview,
+  buildReviewContext,
   cancelReviewJob,
   claimReviewJob,
+  completeAgentRun,
   completeReview,
+  createAgentRun,
   createIndexRun,
   DEFAULT_DIFF_BUDGET,
   dedupeFindings,
@@ -21,12 +27,26 @@ import {
   ModelInvalidOutputError,
   ModelTimeoutError,
   placeFindings,
+  recordAgentToolCall,
+  runAgentLoop,
+  ReviewContextCache,
   selectReviewableFiles,
+  startReview,
+  type AgentAdapter,
   type Database,
   type DiffBudget,
   type GitHubApp,
+  type GitHubClient,
   type IndexQueueJob,
   type Logger,
+  type ModelReviewOutput,
+  type ParsedRepositoryConfig,
+  type PRFile,
+  type PullRequest,
+  type Repository,
+  type RepositoryRulesFile,
+  type RepositorySettings,
+  type RepoRef,
   type ReviewModel,
 } from '@coderexic/core';
 import type { Queue } from 'bullmq';
@@ -35,7 +55,15 @@ import { publishReview } from './publish.js';
 export interface ReviewPipelineDeps {
   db: Database;
   githubApp: GitHubApp;
+  /** One-shot reviewer (AI_AGENT_SPEC.md §15's fallback mode). Always required, since it's also the path used when `agentAdapter` is omitted. */
   model: ReviewModel;
+  /**
+   * When set, reviews run through the tool-calling agent loop (Phase 9)
+   * instead of the one-shot `model` path. Optional so a deployment or a
+   * test can run without agent support at all - the review pipeline then
+   * behaves exactly as it did before Phase 9.
+   */
+  agentAdapter?: AgentAdapter;
   /** Stored on the review row; identifies what actually produced it. */
   provider: string;
   modelName: string;
@@ -50,6 +78,15 @@ export interface ReviewPipelineDeps {
    * never fail the review.
    */
   indexQueue?: Queue<IndexQueueJob>;
+  /** AI_AGENT_SPEC.md §9 agent-loop limits; only used on the `agentAdapter` path. */
+  maxTurns?: number;
+  maxFileFetches?: number;
+  /**
+   * Overrides the agent loop's wall-clock deadline outright, bypassing both
+   * `maxReviewSeconds` and `MIN_AGENT_REVIEW_SECONDS` below. Only meant for
+   * tests that need to prove the TIMED_OUT path without an actual 180s wait.
+   */
+  agentDeadlineMs?: number;
 }
 
 /**
@@ -81,6 +118,15 @@ const SKIP_REASON = {
   draft: 'DRAFT_PULL_REQUEST',
   closed: 'PULL_REQUEST_CLOSED',
 } as const;
+
+/**
+ * `maxReviewSeconds` (repo-configurable, default 60) was sized for the
+ * one-shot path's single model call. The agent loop can spend up to
+ * `MAX_TURNS` calls plus tool-call time inside the same wall clock, so it
+ * gets a taller floor rather than silently timing out most runs. A repo
+ * that explicitly configures a larger `maxReviewSeconds` still wins.
+ */
+const MIN_AGENT_REVIEW_SECONDS = 180;
 
 /**
  * Runs one review job end to end: claim, fetch the PR, ask the model,
@@ -174,7 +220,10 @@ export async function processReviewJob(
     // repository_settings/ignore_patterns); it never writes back to the DB
     // (ARCHITECTURE.md §16's layering, and Phase 13's settings UI owns those rows).
     const minimumSeverity = config.minSeverity ?? settings?.minimumSeverity ?? 'low';
-    const maxReviewSeconds = settings?.maxReviewSeconds ?? 60;
+    const configuredReviewSeconds = settings?.maxReviewSeconds ?? 60;
+    const maxReviewSeconds = deps.agentAdapter
+      ? Math.max(configuredReviewSeconds, MIN_AGENT_REVIEW_SECONDS)
+      : configuredReviewSeconds;
     const ignoreGlobs = [...dbIgnorePatterns, ...config.ignore];
     if (config.warnings.length > 0) {
       log.warn(
@@ -214,27 +263,20 @@ export async function processReviewJob(
       return;
     }
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => {
-      controller.abort();
-    }, maxReviewSeconds * 1000);
-    try {
-      const output = await model.generateReview(
-        {
-          repositoryFullName: repository.fullName,
-          pullRequestTitle: pr.title,
-          pullRequestBody: pr.body,
-          files: selection.files.map(({ filename, status, patch }) => ({
-            filename,
-            status,
-            patch,
-          })),
-          repositoryRules: rulesFile?.content ?? null,
-          languageHint: config.language ?? settings?.languageHint ?? null,
-        },
-        { signal: controller.signal },
-      );
-
+    /**
+     * Shared by both paths below: turns a model's raw output into a posted
+     * GitHub review and the row completeReview persists.
+     */
+    async function publishAndComplete(
+      output: ModelReviewOutput,
+      counts: {
+        filesFetched: number;
+        agentTurns: number;
+        toolCalls: number;
+        inputTokens?: number;
+        outputTokens?: number;
+      },
+    ): Promise<void> {
       const ignoreFiltered = filterIgnoredPaths(output.reviews, ignoreGlobs);
       const deduped = dedupeFindings(filterBySeverity(ignoreFiltered, minimumSeverity));
       const filesByPath = new Map(selection.files.map((file) => [file.filename, file.patch]));
@@ -259,10 +301,12 @@ export async function processReviewJob(
           status: publishError ? 'FAILED' : 'SUCCEEDED',
           summary,
           filesConsidered: files.length,
-          filesFetched: selection.files.length,
-          agentTurns: 1,
-          toolCalls: 0,
+          filesFetched: counts.filesFetched,
+          agentTurns: counts.agentTurns,
+          toolCalls: counts.toolCalls,
           durationMs: Date.now() - startedAt,
+          ...(counts.inputTokens !== undefined && { inputTokens: counts.inputTokens }),
+          ...(counts.outputTokens !== undefined && { outputTokens: counts.outputTokens }),
         },
         findings: built.dbFindings,
         ...(publishError && {
@@ -271,6 +315,60 @@ export async function processReviewJob(
         }),
       });
       if (publishError) log.error({ publishError }, 'review job completed with a publish failure');
+    }
+
+    if (deps.agentAdapter) {
+      await runAgentBranch(deps.agentAdapter, {
+        db,
+        client,
+        ref,
+        pr,
+        repository,
+        files,
+        selection,
+        rulesFile,
+        config,
+        settings,
+        ignoreGlobs,
+        deadlineMs: deps.agentDeadlineMs ?? maxReviewSeconds * 1000,
+        provider,
+        modelName,
+        reviewJobId,
+        startedAt,
+        log,
+        ...(deps.maxTurns !== undefined && { maxTurns: deps.maxTurns }),
+        ...(deps.maxFileFetches !== undefined && { maxFileFetches: deps.maxFileFetches }),
+        publishAndComplete,
+      });
+      return;
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, maxReviewSeconds * 1000);
+    try {
+      const output = await model.generateReview(
+        {
+          repositoryFullName: repository.fullName,
+          pullRequestTitle: pr.title,
+          pullRequestBody: pr.body,
+          files: selection.files.map(({ filename, status, patch }) => ({
+            filename,
+            status,
+            patch,
+          })),
+          repositoryRules: rulesFile?.content ?? null,
+          languageHint: config.language ?? settings?.languageHint ?? null,
+        },
+        { signal: controller.signal },
+      );
+
+      await publishAndComplete(output, {
+        filesFetched: selection.files.length,
+        agentTurns: 1,
+        toolCalls: 0,
+      });
     } catch (err) {
       if (err instanceof ModelTimeoutError) {
         await failReviewJob(db, reviewJobId, 'TIMED_OUT', 'TIMEOUT', err.message);
@@ -298,4 +396,214 @@ export async function processReviewJob(
     // Rethrow so BullMQ records the attempt as failed and applies its retry policy.
     throw err;
   }
+}
+
+interface AgentBranchContext {
+  db: Database;
+  client: GitHubClient;
+  ref: RepoRef;
+  pr: PullRequest;
+  repository: Repository;
+  files: readonly PRFile[];
+  selection: ReturnType<typeof selectReviewableFiles>;
+  rulesFile: RepositoryRulesFile | null;
+  config: ParsedRepositoryConfig;
+  settings: RepositorySettings | undefined;
+  ignoreGlobs: string[];
+  deadlineMs: number;
+  provider: string;
+  modelName: string;
+  reviewJobId: string;
+  startedAt: number;
+  log: Logger;
+  maxTurns?: number;
+  maxFileFetches?: number;
+  publishAndComplete: (
+    output: ModelReviewOutput,
+    counts: {
+      filesFetched: number;
+      agentTurns: number;
+      toolCalls: number;
+      inputTokens?: number;
+      outputTokens?: number;
+    },
+  ) => Promise<void>;
+}
+
+/**
+ * The Phase 9 agent-loop path: builds Phase 7's related-file context,
+ * constructs Phase 8's tool executor, and runs the tool-call loop to
+ * completion, persisting an `agent_runs` row and one `agent_tool_calls` row
+ * per call along the way (DATA_MODEL.md). On any non-`SUCCEEDED` outcome,
+ * finalizes with `completeReview` (never `failReviewJob`, which would leave
+ * the `reviews`/`agent_runs` rows this branch already created stuck
+ * `RUNNING` - AI_AGENT_SPEC.md §14: "a timeout must never leave the review
+ * marked successful," which cuts both ways - it must never leave it
+ * unmarked either).
+ */
+async function runAgentBranch(agentAdapter: AgentAdapter, ctx: AgentBranchContext): Promise<void> {
+  const { db, client, ref, pr, repository, files, selection, config, settings, log } = ctx;
+  const changedPaths = selection.files.map((f) => f.filename);
+  const removedPaths = [
+    ...files.filter((f) => f.status === 'removed').map((f) => f.filename),
+    ...files
+      .filter((f) => f.status === 'renamed' && f.previousFilename)
+      .map((f) => f.previousFilename as string),
+  ];
+
+  const cache = new ReviewContextCache();
+  const contextResult = await buildReviewContext({
+    db,
+    repositoryId: repository.id,
+    client,
+    ref,
+    headSha: pr.headSha,
+    changedPaths,
+    removedPaths,
+    ignoreGlobs: ctx.ignoreGlobs,
+    indexStatus: repository.indexStatus,
+    ...(config.depth !== null && { depth: config.depth }),
+    ...(config.maxFiles !== null && { maxFiles: config.maxFiles }),
+    cache,
+  });
+
+  const { id: reviewId } = await startReview(db, {
+    reviewJobId: ctx.reviewJobId,
+    provider: ctx.provider,
+    model: ctx.modelName,
+  });
+  const agentRun = await createAgentRun(db, reviewId);
+  let toolCallCount = 0;
+
+  try {
+    const executor = new AgentToolExecutor({
+      db,
+      repositoryId: repository.id,
+      client,
+      ref,
+      headSha: pr.headSha,
+      changedPaths,
+      cache,
+    });
+
+    const initialUserMessage = buildAgentPrompt({
+      repositoryFullName: repository.fullName,
+      pullRequestTitle: pr.title,
+      pullRequestBody: pr.body,
+      files: selection.files.map(({ filename, status, patch }) => ({ filename, status, patch })),
+      repositoryRules: ctx.rulesFile?.content ?? null,
+      languageHint: config.language ?? settings?.languageHint ?? null,
+      relatedFiles: contextResult.files,
+      contextNote: contextResult.note,
+    });
+
+    const loopResult = await runAgentLoop({
+      adapter: agentAdapter,
+      executor,
+      systemPrompt: AGENT_SYSTEM_PROMPT,
+      initialUserMessage,
+      deadlineMs: ctx.deadlineMs,
+      ...(ctx.maxTurns !== undefined && { maxTurns: ctx.maxTurns }),
+      ...(ctx.maxFileFetches !== undefined && { maxFileFetches: ctx.maxFileFetches }),
+      onToolCall: async (event) => {
+        toolCallCount += 1;
+        await recordAgentToolCall(db, {
+          agentRunId: agentRun.id,
+          turnNumber: event.turnNumber,
+          toolName: event.toolCall.name,
+          argumentsJson: toStorableArgs(event.toolCall.args),
+          resultSizeBytes: Buffer.byteLength(event.result.text, 'utf8'),
+          durationMs: event.durationMs,
+          status: event.result.status,
+        });
+      },
+    });
+
+    await completeAgentRun(db, agentRun.id, {
+      status: loopResult.status,
+      terminationReason: loopResult.terminationReason,
+      turnCount: loopResult.turnCount,
+      fileFetchCount: loopResult.fileFetchCount,
+    });
+
+    if (loopResult.status === 'SUCCEEDED' && loopResult.output) {
+      await ctx.publishAndComplete(loopResult.output, {
+        filesFetched: loopResult.fileFetchCount,
+        agentTurns: loopResult.turnCount,
+        toolCalls: toolCallCount,
+        inputTokens: loopResult.usage.inputTokens,
+        outputTokens: loopResult.usage.outputTokens,
+      });
+      return;
+    }
+
+    log.warn(
+      { terminationReason: loopResult.terminationReason, turnCount: loopResult.turnCount },
+      'agent review did not complete with a submitted review',
+    );
+    await completeReview(db, {
+      reviewJobId: ctx.reviewJobId,
+      jobStatus: loopResult.status === 'TIMED_OUT' ? 'TIMED_OUT' : 'FAILED',
+      review: {
+        provider: ctx.provider,
+        model: ctx.modelName,
+        status: loopResult.status,
+        summary: `The review agent did not finish (${loopResult.terminationReason}).`,
+        filesConsidered: files.length,
+        filesFetched: loopResult.fileFetchCount,
+        agentTurns: loopResult.turnCount,
+        toolCalls: toolCallCount,
+        durationMs: Date.now() - ctx.startedAt,
+      },
+      findings: [],
+      errorCode: loopResult.terminationReason,
+    });
+  } catch (err) {
+    // A crash here (a malformed tool call whose args can't be stored, a DB error
+    // mid-loop, ...) must not leave the reviews/agent_runs rows this branch already
+    // created stuck RUNNING forever (AI_AGENT_SPEC.md §14 cuts both ways: a run that
+    // didn't finish must never look successful, and must never look unfinished either).
+    log.error({ err }, 'agent review branch failed unexpectedly');
+    await completeAgentRun(db, agentRun.id, {
+      status: 'FAILED',
+      terminationReason: 'MODEL_ERROR',
+      turnCount: 0,
+      fileFetchCount: 0,
+    }).catch((markErr: unknown) => {
+      log.error({ err: markErr }, 'failed to mark agent run failed');
+    });
+    await completeReview(db, {
+      reviewJobId: ctx.reviewJobId,
+      jobStatus: 'FAILED',
+      review: {
+        provider: ctx.provider,
+        model: ctx.modelName,
+        status: 'FAILED',
+        summary: 'The review agent failed unexpectedly.',
+        filesConsidered: files.length,
+        filesFetched: 0,
+        agentTurns: 0,
+        toolCalls: toolCallCount,
+        durationMs: Date.now() - ctx.startedAt,
+      },
+      findings: [],
+      errorCode: 'UNEXPECTED_ERROR',
+      errorMessage: err instanceof Error ? err.message.slice(0, 1000) : 'unknown error',
+    }).catch((markErr: unknown) => {
+      log.error({ err: markErr }, 'failed to mark review failed');
+    });
+    throw err;
+  }
+}
+
+/** jsonb `arguments_json` is NOT NULL: a missing/undefined args object (a malformed tool
+ *  call, e.g. Gemini omitting `args` entirely) must still store something valid, and an
+ *  oversized string arg is capped rather than stored in full (metadata only, DATA_MODEL.md). */
+const MAX_STORED_ARGS_CHARS = 4000;
+function toStorableArgs(args: unknown): unknown {
+  if (args === undefined || args === null) return {};
+  if (typeof args === 'string' && args.length > MAX_STORED_ARGS_CHARS) {
+    return { raw: args.slice(0, MAX_STORED_ARGS_CHARS) };
+  }
+  return args;
 }
