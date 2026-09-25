@@ -21,6 +21,16 @@ export const webEnvSchema = baseEnvSchema.extend({
    * defaults to port 3000.
    */
   NEXTAUTH_URL: z.url(),
+  /**
+   * The GitHub App's URL slug (Settings -> General -> "Public page" URL,
+   * the last path segment), used to build
+   * `https://github.com/apps/<slug>/installations/new`. Optional and
+   * server-only, not `NEXT_PUBLIC_*`: Next inlines `NEXT_PUBLIC_*` vars at
+   * `next build` time, which would bake in `undefined` for a build that
+   * doesn't have it, and this app never needs it in client JS - the
+   * install link is rendered server-side and passed down as a plain href.
+   */
+  GITHUB_APP_SLUG: z.string().min(1).optional(),
 });
 export type WebEnv = z.infer<typeof webEnvSchema>;
 

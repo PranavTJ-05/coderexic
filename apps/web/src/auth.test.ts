@@ -1,8 +1,16 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('server-only', () => ({}));
 
 describe('getAuthOptions', () => {
+  // A cold `import('./auth.js')` pulls in @coderexic/core; under many
+  // parallel vitest workers that first import can be slow enough to trip
+  // the default 5s test timeout. Warming it once here keeps each test's
+  // own `await import(...)` calls (needed after `vi.resetModules()`) fast.
+  beforeAll(async () => {
+    await import('./auth.js');
+  });
+
   beforeEach(() => {
     vi.resetModules();
     vi.stubEnv('DATABASE_URL', 'postgres://user:pass@localhost:5432/db');
