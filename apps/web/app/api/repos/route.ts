@@ -2,6 +2,7 @@ import 'server-only';
 import { GitHubUserAccessError, listAuthorizedRepositories } from '@coderexic/core';
 import { NextResponse, type NextRequest } from 'next/server';
 import { db } from '../../../src/db';
+import { toAuthorizedRepositoryDto } from '../../../src/dto';
 import { getAccessToken } from '../../../src/session';
 
 /**
@@ -18,7 +19,7 @@ export async function GET(req: NextRequest) {
   }
   try {
     const repositories = await listAuthorizedRepositories(db().db, accessToken);
-    return NextResponse.json({ repositories });
+    return NextResponse.json({ repositories: repositories.map(toAuthorizedRepositoryDto) });
   } catch (err) {
     // A GitHub App user token expires (8h by default) - GitHub's own 401
     // here means "sign in again," not a bug. Anything else is a genuine

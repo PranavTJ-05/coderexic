@@ -110,7 +110,12 @@ export function RepositoryDetail({ repositoryId }: { repositoryId: string }) {
                       {review.findingsCount > 0 ? ` - ${review.findingsCount} findings` : ''}
                     </span>
                   </div>
-                  <StatusBadge status={review.status} />
+                  <div className="flex flex-col items-end gap-1">
+                    <StatusBadge status={review.status} />
+                    {review.errorCode ? (
+                      <span className="text-xs text-[var(--destructive)]">{review.errorCode}</span>
+                    ) : null}
+                  </div>
                 </Card>
               </a>
             ))}

@@ -1081,10 +1081,13 @@ test` (318 tests), `pnpm test:integration` (186 tests, +16 since 13b), and
 `pnpm build` all pass - verified from a clean `packages/core/dist`.
 
 **UX:** a user can go Login → Install App → Select repo → Configure model →
-Open PR → Receive review, without reading developer docs. Met as of this
-phase for the happy path; onboarding is still folded into GitHub's own
-install flow rather than a dedicated in-app page (13b's decision, still
-standing).
+Open PR → Receive review, without reading developer docs. Built
+end-to-end as of this phase - not verified end-to-end: no authenticated
+request in 13a/13b/13c has ever gotten a 200 back with real data (see
+"not browser-verified" above), since that needs a real GitHub token and a
+browser, neither available here. Onboarding is still folded into GitHub's
+own install flow rather than a dedicated in-app page (13b's decision,
+still standing).
 
 ## Phase 14: Observability
 **Goal:** understand the system in production.

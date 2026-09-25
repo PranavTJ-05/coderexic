@@ -53,13 +53,18 @@ export async function GET(
     if (!repository) {
       return NextResponse.json({ error: 'not found' }, { status: 404 });
     }
-    const [settings, jobs, ignorePatterns, credentials, usage] = await Promise.all([
+    const [settings, jobs, ignorePatterns, usage] = await Promise.all([
       getRepositorySettings(db().db, repositoryId),
       listReviewJobsForRepository(db().db, repositoryId, { limit: PAGE_SIZE + 1, offset }),
       listIgnorePatterns(db().db, repositoryId),
-      listModelCredentials(db().db, { repositoryId }),
       getRepositoryUsageSummary(db().db, repositoryId),
     ]);
+    // BYOK credential metadata and whether this deployment even has BYOK
+    // configured are admin-only information, not fetched at all for a
+    // merely-authorized (non-admin) viewer.
+    const credentials = authorized.isAdmin
+      ? await listModelCredentials(db().db, { repositoryId })
+      : [];
     const hasMore = jobs.length > PAGE_SIZE;
     return NextResponse.json({
       repository: toRepositoryDetailDto(repository, settings),
@@ -68,7 +73,7 @@ export async function GET(
       hasMore,
       ignorePatterns,
       credentials: credentials.map(toModelCredentialDto),
-      byokConfigured: getModelCredentialsConfig() !== null,
+      byokConfigured: authorized.isAdmin ? getModelCredentialsConfig() !== null : false,
       usage: toRepositoryUsageDto(usage),
     });
   } catch (err) {

@@ -78,6 +78,9 @@ export async function DELETE(
   req: NextRequest,
   context: { params: Promise<{ repositoryId: string }> },
 ) {
+  const originCheck = requireSameOriginJson(req, loadWebEnv().NEXTAUTH_URL);
+  if (originCheck) return originCheck;
+
   const { repositoryId } = await context.params;
   const result = await requireRepoAdmin(req, repositoryId);
   if (!result.ok) return result.response;
