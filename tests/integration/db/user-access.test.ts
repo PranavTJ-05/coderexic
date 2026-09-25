@@ -20,7 +20,14 @@ function jsonResponse(body: unknown, status = 200) {
 /** A single-page fetch mock: one installations page, one repos page per installation. */
 function fakeFetch(
   installations: { id: number }[],
-  reposByInstallation: Record<number, { id: number; full_name: string }[]>,
+  reposByInstallation: Record<
+    number,
+    {
+      id: number;
+      full_name: string;
+      permissions?: { admin?: boolean; push?: boolean; pull?: boolean };
+    }[]
+  >,
 ) {
   return vi.fn<typeof globalThis.fetch>().mockImplementation((url) => {
     const href = url as string;
@@ -43,7 +50,11 @@ describe('listAuthorizedRepositories', () => {
     const repository = await makeRepository(db, installation.id);
     const fetchImpl = fakeFetch([{ id: installation.githubInstallationId }], {
       [installation.githubInstallationId]: [
-        { id: repository.githubRepositoryId, full_name: repository.fullName },
+        {
+          id: repository.githubRepositoryId,
+          full_name: repository.fullName,
+          permissions: { admin: true, pull: true, push: true },
+        },
       ],
     });
 
@@ -56,8 +67,39 @@ describe('listAuthorizedRepositories', () => {
         repositoryId: repository.id,
         githubRepositoryId: repository.githubRepositoryId,
         fullName: repository.fullName,
+        isAdmin: true,
       },
     ]);
+  });
+
+  it('reports isAdmin: false for a repo where GitHub reports admin: false', async () => {
+    const installation = await makeInstallation(db);
+    const repository = await makeRepository(db, installation.id);
+    const fetchImpl = fakeFetch([{ id: installation.githubInstallationId }], {
+      [installation.githubInstallationId]: [
+        {
+          id: repository.githubRepositoryId,
+          full_name: repository.fullName,
+          permissions: { admin: false, pull: true, push: false },
+        },
+      ],
+    });
+
+    const [result] = await listAuthorizedRepositories(db, 'user-token', fetchImpl);
+    expect(result?.isAdmin).toBe(false);
+  });
+
+  it('fails closed to isAdmin: false when GitHub omits permissions entirely', async () => {
+    const installation = await makeInstallation(db);
+    const repository = await makeRepository(db, installation.id);
+    const fetchImpl = fakeFetch([{ id: installation.githubInstallationId }], {
+      [installation.githubInstallationId]: [
+        { id: repository.githubRepositoryId, full_name: repository.fullName },
+      ],
+    });
+
+    const [result] = await listAuthorizedRepositories(db, 'user-token', fetchImpl);
+    expect(result?.isAdmin).toBe(false);
   });
 
   it('excludes an installation GitHub reports but our DB does not know about', async () => {

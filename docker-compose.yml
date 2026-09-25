@@ -84,6 +84,12 @@ services:
       GITHUB_PRIVATE_KEY: ${GITHUB_PRIVATE_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-}
+      # Optional (Phase 13c) - repo-level BYOK is silently skipped without
+      # it, not an error. If set, must be the exact same value apps/web
+      # uses to encrypt (apps/web isn't containerized yet - see ROADMAP.md
+      # Phase 13a - so that's still set outside this file for now).
+      MODEL_CREDENTIALS_MASTER_KEYS: ${MODEL_CREDENTIALS_MASTER_KEYS:-}
+      MODEL_CREDENTIALS_KEY_VERSION: ${MODEL_CREDENTIALS_KEY_VERSION:-}
     volumes:
       - ${GITHUB_PRIVATE_KEY_PATH:-/dev/null}:/run/secrets/github-app.pem:ro
     depends_on:

@@ -6,6 +6,7 @@ import {
   createLogger,
   createRedisConnection,
   loadGitHubAppCredentials,
+  loadModelCredentialsConfig,
   type ProviderCredentials,
 } from '@coderexic/core';
 import { loadWorkerEnv } from './env.js';
@@ -74,6 +75,21 @@ if (env.AGENT_LOOP_ENABLED) {
   );
 }
 
+// Optional (ROADMAP.md Phase 13c): a deployment that has never configured
+// BYOK must still boot. Eagerly parses+validates the master key map itself
+// (not just checks the var is a non-empty string) when set, same as
+// `loadModelCredentialsConfig`'s own doc comment - a malformed key fails
+// loudly at startup, not on the first review that happens to hit a repo
+// with a BYOK credential.
+const modelCredentialsConfig = env.MODEL_CREDENTIALS_MASTER_KEYS
+  ? loadModelCredentialsConfig(process.env)
+  : undefined;
+if (!modelCredentialsConfig) {
+  logger.warn(
+    "MODEL_CREDENTIALS_MASTER_KEYS is not set; repo-level BYOK credentials will never be used, every review runs on this deployment's own configured provider",
+  );
+}
+
 const worker = createReviewWorker({
   logger,
   db: database.db,
@@ -84,6 +100,7 @@ const worker = createReviewWorker({
   provider: defaultEntry.provider,
   modelName: defaultEntry.modelName,
   providers,
+  ...(modelCredentialsConfig && { masterKeys: modelCredentialsConfig.masterKeys }),
   concurrency: env.REVIEW_CONCURRENCY,
 });
 

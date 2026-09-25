@@ -9,15 +9,18 @@ import {
   indexRuns,
   markRepositoryIndexed,
   ModelHttpError,
+  ProviderCredentialResolutionError,
   reviewFindings,
   reviewJobs,
   reviews,
+  updateRepositorySettings,
   type CreateReviewInput,
   type GitHubApp,
   type GitHubClient,
   type ModelReviewOutput,
   type PRFile,
   type PullRequest,
+  type ResolvedProviderEntry,
   type ReviewModel,
   type ReviewModelInput,
 } from '@coderexic/core';
@@ -492,6 +495,268 @@ describe('worker: processReviewJob', () => {
     const [reviewRow] = await db.select().from(reviews).where(eq(reviews.reviewJobId, job.id));
     expect(reviewRow).toMatchObject({ provider: 'gemini', model: 'gemini-default' });
     expect(client.createReviewCalls[0]?.body).toContain('not configured on this deployment');
+  });
+
+  describe('repo-level model provider (Phase 13c)', () => {
+    /** A masterKeys value that's never actually used cryptographically - tests inject `resolveProviderEntry` instead. */
+    const FAKE_MASTER_KEYS = new Map([[1, Buffer.alloc(32)]]);
+    /** A ProviderEntry's agentAdapter is required; a real reject proves it's never invoked when these tests never set deps.agentAdapter. */
+    const REJECT_AGENT_ADAPTER = {
+      chat: () => Promise.reject(new Error('agent loop should not run here')),
+    };
+
+    it("uses the repository's own BYOK credential over the system key, when masterKeys is configured", async () => {
+      const { job, repository } = await makeReviewJob(db);
+      const client = fakeClient({ repoFiles: { '.coderexic.yml': 'model: anthropic\n' } });
+      const { model: systemModel, calls: systemCalls } = recordingModel(FINDING_OUTPUT);
+      const { model: repoModel, calls: repoCalls } = recordingModel(FINDING_OUTPUT);
+      const resolveProviderEntry = vi
+        .fn()
+        .mockImplementation((_db, lookup: { repositoryId?: string; provider: string }) => {
+          expect(lookup.repositoryId).toBe(repository.id);
+          expect(lookup.provider).toBe('anthropic');
+          const entry: ResolvedProviderEntry = {
+            provider: 'anthropic',
+            modelName: 'claude-repo-key',
+            reviewModel: repoModel,
+            agentAdapter: REJECT_AGENT_ADAPTER,
+            source: 'repo',
+          };
+          return Promise.resolve(entry);
+        });
+
+      await processReviewJob(
+        {
+          db,
+          githubApp: fakeGithubApp(client),
+          model: systemModel,
+          provider: 'gemini',
+          modelName: 'gemini-default',
+          logger,
+          providers: {
+            anthropic: {
+              provider: 'anthropic',
+              modelName: 'claude-system-key',
+              reviewModel: systemModel,
+              agentAdapter: REJECT_AGENT_ADAPTER,
+            },
+          },
+          masterKeys: FAKE_MASTER_KEYS,
+          resolveProviderEntry,
+        },
+        job.id,
+      );
+
+      expect(repoCalls).toHaveLength(1);
+      expect(systemCalls).toHaveLength(0);
+      const [reviewRow] = await db.select().from(reviews).where(eq(reviews.reviewJobId, job.id));
+      expect(reviewRow).toMatchObject({ provider: 'anthropic', model: 'claude-repo-key' });
+    });
+
+    it('falls back to the system key when the repository has no BYOK credential for the provider', async () => {
+      const { job } = await makeReviewJob(db);
+      const client = fakeClient({ repoFiles: { '.coderexic.yml': 'model: anthropic\n' } });
+      const { model: systemModel, calls: systemCalls } = recordingModel(FINDING_OUTPUT);
+      const resolveProviderEntry = vi
+        .fn()
+        .mockImplementation(
+          (
+            _db,
+            _lookup: unknown,
+            _masterKeys: unknown,
+            systemRegistry: Record<string, ResolvedProviderEntry>,
+          ) =>
+            Promise.resolve(
+              systemRegistry.anthropic
+                ? { ...systemRegistry.anthropic, source: 'system' }
+                : undefined,
+            ),
+        );
+
+      await processReviewJob(
+        {
+          db,
+          githubApp: fakeGithubApp(client),
+          model: systemModel,
+          provider: 'gemini',
+          modelName: 'gemini-default',
+          logger,
+          providers: {
+            anthropic: {
+              provider: 'anthropic',
+              modelName: 'claude-system-key',
+              reviewModel: systemModel,
+              agentAdapter: REJECT_AGENT_ADAPTER,
+            },
+          },
+          masterKeys: FAKE_MASTER_KEYS,
+          resolveProviderEntry,
+        },
+        job.id,
+      );
+
+      expect(systemCalls).toHaveLength(1);
+      const [reviewRow] = await db.select().from(reviews).where(eq(reviews.reviewJobId, job.id));
+      expect(reviewRow).toMatchObject({ provider: 'anthropic', model: 'claude-system-key' });
+    });
+
+    it("uses repository_settings.model_provider when there's no .coderexic.yml model field", async () => {
+      const { job, repository } = await makeReviewJob(db);
+      await updateRepositorySettings(db, repository.id, { modelProvider: 'groq' });
+      const client = fakeClient();
+      const { model: defaultModel, calls: defaultCalls } = recordingModel(FINDING_OUTPUT);
+      const { model: groqModel, calls: groqCalls } = recordingModel(FINDING_OUTPUT);
+
+      await processReviewJob(
+        {
+          db,
+          githubApp: fakeGithubApp(client),
+          model: defaultModel,
+          provider: 'gemini',
+          modelName: 'gemini-default',
+          logger,
+          providers: {
+            groq: {
+              provider: 'groq',
+              modelName: 'llama-groq',
+              reviewModel: groqModel,
+              agentAdapter: REJECT_AGENT_ADAPTER,
+            },
+          },
+          // masterKeys unset: BYOK resolution skipped entirely, straight to the system registry.
+        },
+        job.id,
+      );
+
+      expect(defaultCalls).toHaveLength(0);
+      expect(groqCalls).toHaveLength(1);
+    });
+
+    it('.coderexic.yml model wins over repository_settings.model_provider when both are set', async () => {
+      const { job, repository } = await makeReviewJob(db);
+      await updateRepositorySettings(db, repository.id, { modelProvider: 'groq' });
+      const client = fakeClient({ repoFiles: { '.coderexic.yml': 'model: anthropic\n' } });
+      const { model: defaultModel, calls: defaultCalls } = recordingModel(FINDING_OUTPUT);
+      const { model: groqModel, calls: groqCalls } = recordingModel(FINDING_OUTPUT);
+      const { model: anthropicModel, calls: anthropicCalls } = recordingModel(FINDING_OUTPUT);
+
+      await processReviewJob(
+        {
+          db,
+          githubApp: fakeGithubApp(client),
+          model: defaultModel,
+          provider: 'gemini',
+          modelName: 'gemini-default',
+          logger,
+          providers: {
+            groq: {
+              provider: 'groq',
+              modelName: 'llama-groq',
+              reviewModel: groqModel,
+              agentAdapter: REJECT_AGENT_ADAPTER,
+            },
+            anthropic: {
+              provider: 'anthropic',
+              modelName: 'claude-yml',
+              reviewModel: anthropicModel,
+              agentAdapter: REJECT_AGENT_ADAPTER,
+            },
+          },
+        },
+        job.id,
+      );
+
+      expect(defaultCalls).toHaveLength(0);
+      expect(groqCalls).toHaveLength(0);
+      expect(anthropicCalls).toHaveLength(1);
+    });
+
+    it('falls back to the default with a warning when repository_settings names a provider this deployment has no key for', async () => {
+      const { job, repository } = await makeReviewJob(db);
+      await updateRepositorySettings(db, repository.id, { modelProvider: 'openai' });
+      const client = fakeClient();
+      const { model: defaultModel, calls: defaultCalls } = recordingModel(FINDING_OUTPUT);
+
+      await processReviewJob(
+        {
+          db,
+          githubApp: fakeGithubApp(client),
+          model: defaultModel,
+          provider: 'gemini',
+          modelName: 'gemini-default',
+          logger,
+          providers: {},
+        },
+        job.id,
+      );
+
+      expect(defaultCalls).toHaveLength(1);
+      expect(client.createReviewCalls[0]?.body).toContain('not configured on this deployment');
+    });
+
+    it('never turns the agent loop on for a BYOK entry when deps.agentAdapter is globally unset', async () => {
+      const { job } = await makeReviewJob(db);
+      const client = fakeClient({ repoFiles: { '.coderexic.yml': 'model: anthropic\n' } });
+      const { model: repoModel, calls: repoCalls } = recordingModel(FINDING_OUTPUT);
+      const resolveProviderEntry = vi.fn().mockResolvedValue({
+        provider: 'anthropic',
+        modelName: 'claude-repo-key',
+        reviewModel: repoModel,
+        // A real reject proves this adapter was never invoked, not just left unset.
+        agentAdapter: { chat: () => Promise.reject(new Error('agent loop should not run here')) },
+        source: 'repo',
+      } satisfies ResolvedProviderEntry);
+
+      await processReviewJob(
+        {
+          db,
+          githubApp: fakeGithubApp(client),
+          model: repoModel,
+          provider: 'gemini',
+          modelName: 'gemini-default',
+          logger,
+          // deps.agentAdapter is deliberately omitted (globally off).
+          masterKeys: FAKE_MASTER_KEYS,
+          resolveProviderEntry,
+        },
+        job.id,
+      );
+
+      expect(repoCalls).toHaveLength(1);
+    });
+
+    it('fails the review with BYOK_CREDENTIAL_ERROR, never silently falling back, when credential resolution throws', async () => {
+      const { job } = await makeReviewJob(db);
+      const client = fakeClient({ repoFiles: { '.coderexic.yml': 'model: anthropic\n' } });
+      const { model: defaultModel, calls: defaultCalls } = recordingModel(FINDING_OUTPUT);
+      const resolveProviderEntry = vi
+        .fn()
+        .mockRejectedValue(
+          new ProviderCredentialResolutionError(
+            'failed to resolve the stored anthropic credential',
+            new Error('bad master key'),
+          ),
+        );
+
+      await processReviewJob(
+        {
+          db,
+          githubApp: fakeGithubApp(client),
+          model: defaultModel,
+          provider: 'gemini',
+          modelName: 'gemini-default',
+          logger,
+          masterKeys: FAKE_MASTER_KEYS,
+          resolveProviderEntry,
+        },
+        job.id,
+      );
+
+      expect(defaultCalls).toHaveLength(0);
+      expect(client.createReviewCalls).toHaveLength(0);
+      const [jobRow] = await db.select().from(reviewJobs).where(eq(reviewJobs.id, job.id));
+      expect(jobRow).toMatchObject({ status: 'FAILED', errorCode: 'BYOK_CREDENTIAL_ERROR' });
+    });
   });
 
   it('reads the rules file (first match in precedence order) from the base sha and passes it to the model', async () => {

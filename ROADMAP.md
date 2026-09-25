@@ -951,18 +951,143 @@ test` (318 tests), `pnpm test:integration` (170 tests, +11 in the new
 `packages/core/dist` (a fresh clone's state).
 
 ### Phase 13c: settings and BYOK
-**Pages:** Settings, Model settings, Review rules, Usage.
+**Pages:** Settings (folds Model settings, Review rules and Usage into one
+page at `/repositories/[repositoryId]/settings`, rather than four separate
+routes - see the "why one page" note below), linked from the repository
+page (13b) for a repo admin only.
 
-Not started. This is also where the repo-tier BYOK credential
-(`packages/core/src/llm/credential-resolution.ts`'s `resolveProviderEntry`,
-built and tested in Phase 11 but never wired into
-`apps/worker/src/review/pipeline.ts`) finally gets a real settings UI and
-an authorization rule (e.g., only repo admins set a repo-level key) to
-sit behind.
+- [x] **Repo-tier BYOK finally wired into the review pipeline.**
+      `packages/core/src/llm/credential-resolution.ts`'s
+      `resolveProviderEntry` (built and tested in Phase 11) is now called
+      from `apps/worker/src/review/pipeline.ts` via a new
+      `resolveReviewProvider` helper, repo-tier only - there's no acting
+      user at review time (a webhook or `/review review` trigger has a
+      repository, never a signed-in user), so `resolveProviderEntry` never
+      receives a `userId`.
+- [x] **Provider precedence extended:** `.coderexic.yml`'s `model:`
+      (untrusted repo input, unchanged from Phase 10) >
+      `repository_settings.model_provider` (new - the settings page's own
+      write) > this deployment's fixed default. Whichever provider wins,
+      its actual credential still goes through BYOK resolution - a repo's
+      own key for that provider outranks the deployment's key for it.
+      `repository_settings.model_name` is stored but **deliberately not
+      applied to model selection this phase** - see "what's still open"
+      below.
+- [x] **A BYOK credential resolution failure fails the review outright**
+      (`errorCode: 'BYOK_CREDENTIAL_ERROR'`), never silently falls back to
+      the deployment's own key - a fallback there would quietly bill the
+      operator instead of respecting the repo admin's explicit choice. A
+      new `ProviderCredentialResolutionError` (in `credential-resolution.ts`)
+      carries this distinction; a plain "provider not configured anywhere"
+      (no repo key, no deployment key) still falls back with a warning,
+      exactly like the existing `.coderexic.yml` fallback.
+- [x] **`MODEL_CREDENTIALS_MASTER_KEYS` is optional in both `apps/worker`
+      and `apps/web`** (Phase 11's own env schema requires it; both apps
+      override that with an optional field) - a deployment that has never
+      configured BYOK must still boot, and boots today without it. Unset,
+      `apps/worker` skips repo-tier resolution entirely (logged once at
+      startup) and `apps/web` disables the BYOK write routes (`501`) and
+      form. **The two must be set to the exact same value** if BYOK is
+      used at all - the web app encrypts with it, the worker decrypts with
+      it. Both `.env.example` files call this out; it's the same
+      two-separate-env-files trap Phase 13a hit with `GITHUB_CLIENT_ID`.
+- [x] **Authorization: only a GitHub repo *admin* can write settings, BYOK
+      keys or ignore patterns.** `AuthorizedRepository` (in
+      `packages/core/src/github/user-access.ts`) gained an `isAdmin` field
+      from GitHub's own `permissions.admin` - verified against GitHub's
+      OpenAPI spec (not assumed from docs prose) that
+      `GET /user/installations/{id}/repositories` returns the shared
+      `repository` schema, which includes `permissions`. That field isn't
+      itself marked required on the shared schema, so a missing
+      `permissions` object is treated as **not admin** (fail closed), not
+      assumed-present. `apps/web/src/authorize.ts`'s `requireRepoAdmin` is
+      the single gate every write route shares; a non-admin, authorized
+      user still gets full read access (the settings page shows
+      "admin access required" instead of forms), and a nonexistent/
+      unauthorized repository id still 404s either way, never 403 - a 403
+      would leak "this repo exists" to someone who can't see it at all.
+- [x] **New `packages/core` pieces, all integration-tested:**
+      `db/store/repositories.ts`'s `updateRepositorySettings` (partial
+      update - only touches fields the caller actually sent),
+      `addIgnorePattern`/`removeIgnorePattern` (the `ignore_patterns` table
+      existed since Phase 5 but had no writer until now - the pipeline
+      already reads it via `listIgnorePatterns`), and
+      `db/store/review-jobs.ts`'s `getRepositoryUsageSummary` (real data:
+      `reviews.inputTokens`/`outputTokens`/`durationMs` are already
+      populated by the pipeline for both the one-shot and agent-loop
+      paths - this just sums them per repository).
+      `repository_settings_model_provider_ck` (new migration) enforces
+      `model_provider` is one of `SUPPORTED_MODEL_PROVIDERS` or `NULL` at
+      the DB layer, not just app-layer validation.
+- [x] **New `apps/web` routes:** `GET /api/repositories/[id]` (13b's
+      route, extended with `isAdmin`, `ignorePatterns`, `credentials`
+      metadata, `byokConfigured` and `usage` - one response for both the
+      repository page and the settings page, rather than a parallel read
+      route re-deriving the same authorization check), `PUT .../settings`,
+      `POST`/`DELETE .../ignore-patterns`, `PUT`/`DELETE .../credentials`.
+      Every mutating route requires `content-type: application/json` and
+      checks `Origin` against `NEXTAUTH_URL` (`requireSameOriginJson`) -
+      these are the first POST/PUT/DELETE routes in `apps/web`, so there
+      was no existing pattern to reuse; the session cookie is already
+      `SameSite=Lax` (next-auth's default), so this is defense in depth,
+      not the only guard. A submitted BYOK key is validated against the
+      provider's own API (`validateModelCredential`, Phase 11) *before*
+      it's ever stored - a bad key is rejected at write time with `422`,
+      not discovered silently the next time a review runs.
+- [x] **Why one page, not four:** "Model settings" and "Review rules" (as
+      the roadmap originally named the pages) map cleanly onto real,
+      wired-in data - the model provider/name/severity fields and the
+      `ignore_patterns` table, respectively - so they're real sections of
+      this page, not placeholders. A separate "Review rules" page that
+      *edited* `.coderexic.yml`/the rules file itself was never built: that
+      file is version-controlled in the repository by design
+      (PRODUCT_SPEC.md, ARCHITECTURE.md §16's config layering), so editing
+      it through a web form would fight the source of truth rather than
+      complement it - "review rules" here means the ignore-pattern list
+      only. `repository_rules` (Phase 2's schema) is still never written to
+      by anything; the pipeline loads rules straight from GitHub at review
+      time (`loadRepositoryRules`), so that table stays unused - flagged
+      here rather than building a page that would read zero rows forever.
+      "Usage" is a real, DB-backed summary (see above), not a placeholder.
+
+**What's still open (by design, not oversight):**
+- `repository_settings.model_name` is stored (the settings form writes it)
+  but not applied to model selection - `resolveReviewProvider` uses this
+  deployment's configured model or the provider's own default, regardless.
+  Applying a free-text model name against the *operator's own system key*
+  would let a repo admin pick the operator's most expensive model; a
+  correctly-scoped version (applied only when the resolved credential's
+  `source` is `'repo'`) is a small follow-up, not done this phase to keep
+  the change reviewable.
+- No credential-rotation reminder, no per-repo spend cap, no audit log of
+  who set/removed a BYOK key (`audit_events`, Phase 2's schema, exists but
+  nothing writes to it yet - same as `repository_rules`).
+- The settings page has no "test this key" action beyond the write-time
+  validation call; a stored key can still stop working later (the
+  provider revokes it, etc.) and only surfaces as a failed review.
+
+**Not browser-verified**, same caveat as 13a/13b: `next build` succeeds
+with zero env vars, and every mutating route's unauthenticated/malformed-
+request path was curled against a real running server (401 with no
+session, 415 for a non-JSON content-type, 403 for a cross-origin request,
+and the page-level 307 redirects) - the authenticated-admin happy path is
+exercised only by `packages/core`'s integration tests
+(`tests/integration/db/dashboard.test.ts`'s new store tests,
+`tests/integration/worker-pipeline.test.ts`'s 7 new BYOK-resolution
+tests), never over HTTP with a real GitHub token.
+
+**Done when:** `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm
+test` (318 tests), `pnpm test:integration` (186 tests, +16 since 13b), and
+`pnpm build` all pass - verified from a clean `packages/core/dist`.
 
 **UX:** a user can go Login → Install App → Select repo → Configure model →
-Open PR → Receive review, without reading developer docs. Not met until
-13b/13c land.
+Open PR → Receive review, without reading developer docs. Built
+end-to-end as of this phase - not verified end-to-end: no authenticated
+request in 13a/13b/13c has ever gotten a 200 back with real data (see
+"not browser-verified" above), since that needs a real GitHub token and a
+browser, neither available here. Onboarding is still folded into GitHub's
+own install flow rather than a dedicated in-app page (13b's decision,
+still standing).
 
 ## Phase 14: Observability
 **Goal:** understand the system in production.

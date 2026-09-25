@@ -5,13 +5,40 @@
  * to the client just by existing.
  */
 import type {
+  AuthorizedRepository,
+  ModelCredentialMetadata,
   Repository,
   RepositorySettings,
+  RepositoryUsageSummary,
   Review,
   ReviewFinding,
   ReviewJob,
   ReviewJobSummary,
 } from '@coderexic/core';
+
+/**
+ * `/api/repos`'s shape (Phase 13a), unchanged since - deliberately not
+ * `AuthorizedRepository` spread directly, so a field added to that type
+ * later (like Phase 13c's `isAdmin`) doesn't silently start leaking here
+ * too.
+ */
+export interface AuthorizedRepositoryDto {
+  installationId: string;
+  githubInstallationId: number;
+  repositoryId: string;
+  githubRepositoryId: number;
+  fullName: string;
+}
+
+export function toAuthorizedRepositoryDto(repo: AuthorizedRepository): AuthorizedRepositoryDto {
+  return {
+    installationId: repo.installationId,
+    githubInstallationId: repo.githubInstallationId,
+    repositoryId: repo.repositoryId,
+    githubRepositoryId: repo.githubRepositoryId,
+    fullName: repo.fullName,
+  };
+}
 
 export interface RepositorySummaryDto {
   repositoryId: string;
@@ -28,6 +55,8 @@ export interface ReviewJobSummaryDto {
   headSha: string;
   triggerType: string;
   status: string;
+  /** e.g. `BYOK_CREDENTIAL_ERROR`, `MODEL_ERROR` - null on a job that never failed. */
+  errorCode: string | null;
   createdAt: string;
   completedAt: string | null;
   reviewSummary: string | null;
@@ -66,6 +95,8 @@ export interface ReviewDetailDto {
   pullRequestNumber: number;
   headSha: string;
   status: string;
+  /** e.g. `BYOK_CREDENTIAL_ERROR`, `MODEL_ERROR` - null on a job that never failed. */
+  errorCode: string | null;
   /** null until the worker has actually completed a review (e.g. still PENDING/RUNNING, or it FAILED before any review row was written). */
   provider: string | null;
   model: string | null;
@@ -84,6 +115,7 @@ export function toReviewDetailDto(
     pullRequestNumber: job.pullRequestNumber,
     headSha: job.headSha,
     status: job.status,
+    errorCode: job.errorCode,
     provider: review?.provider ?? null,
     model: review?.model ?? null,
     summary: review?.summary ?? null,
@@ -98,6 +130,7 @@ export function toReviewJobSummaryDto(row: ReviewJobSummary): ReviewJobSummaryDt
     headSha: row.job.headSha,
     triggerType: row.job.triggerType,
     status: row.job.status,
+    errorCode: row.job.errorCode,
     createdAt: row.job.createdAt.toISOString(),
     completedAt: row.job.completedAt ? row.job.completedAt.toISOString() : null,
     reviewSummary: row.review?.summary ?? null,
@@ -137,6 +170,34 @@ export function toRepositoryDetailDto(
       minimumSeverity: settings?.minimumSeverity ?? 'low',
     },
   };
+}
+
+export interface ModelCredentialDto {
+  id: string;
+  provider: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function toModelCredentialDto(row: ModelCredentialMetadata): ModelCredentialDto {
+  return {
+    id: row.id,
+    provider: row.provider,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+export interface RepositoryUsageDto {
+  reviewCount: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalDurationMs: number;
+  jobCountByStatus: Partial<Record<string, number>>;
+}
+
+export function toRepositoryUsageDto(summary: RepositoryUsageSummary): RepositoryUsageDto {
+  return summary;
 }
 
 export function toReviewFindingDto(finding: ReviewFinding): ReviewFindingDto {

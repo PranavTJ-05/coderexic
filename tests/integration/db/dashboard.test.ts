@@ -6,6 +6,7 @@ import {
   findAuthorizedReviewJob,
   findLatestReviewJobForRepository,
   findReviewWithFindings,
+  getRepositoryUsageSummary,
   listReviewJobsForRepository,
   markRepositoriesRemoved,
 } from '@coderexic/core';
@@ -239,5 +240,85 @@ describe('findAuthorizedRepository / findAuthorizedReviewJob', () => {
     expect(
       await findAuthorizedReviewJob(db, 'user-token', 'not-a-uuid', fetchImpl),
     ).toBeUndefined();
+  });
+});
+
+describe('getRepositoryUsageSummary', () => {
+  it('sums tokens/duration across reviews and breaks jobs down by status', async () => {
+    const repository = await makeRepository(db);
+    const { job: succeeded1 } = await createReviewJob(db, {
+      repositoryId: repository.id,
+      installationId: repository.installationId,
+      pullRequestNumber: 1,
+      headSha: 'a'.repeat(40),
+      triggerType: 'automatic',
+      idempotencyKey: automaticReviewKey(repository.id, 1, 'a'.repeat(40)),
+    });
+    await completeReview(db, {
+      reviewJobId: succeeded1.id,
+      jobStatus: 'SUCCEEDED',
+      review: {
+        provider: 'gemini',
+        model: 'gemini-2.5-pro',
+        status: 'SUCCEEDED',
+        inputTokens: 1000,
+        outputTokens: 200,
+        durationMs: 5000,
+      },
+      findings: [],
+    });
+
+    const { job: succeeded2 } = await createReviewJob(db, {
+      repositoryId: repository.id,
+      installationId: repository.installationId,
+      pullRequestNumber: 2,
+      headSha: 'b'.repeat(40),
+      triggerType: 'automatic',
+      idempotencyKey: automaticReviewKey(repository.id, 2, 'b'.repeat(40)),
+    });
+    await completeReview(db, {
+      reviewJobId: succeeded2.id,
+      jobStatus: 'SUCCEEDED',
+      review: {
+        provider: 'gemini',
+        model: 'gemini-2.5-pro',
+        status: 'SUCCEEDED',
+        inputTokens: 500,
+        outputTokens: 100,
+        durationMs: 3000,
+      },
+      findings: [],
+    });
+
+    await createReviewJob(db, {
+      repositoryId: repository.id,
+      installationId: repository.installationId,
+      pullRequestNumber: 3,
+      headSha: 'c'.repeat(40),
+      triggerType: 'automatic',
+      idempotencyKey: automaticReviewKey(repository.id, 3, 'c'.repeat(40)),
+    });
+    // A third job stays PENDING (no review row) - proves jobCountByStatus
+    // counts jobs, not reviews, and PENDING contributes nothing to the sums.
+
+    const summary = await getRepositoryUsageSummary(db, repository.id);
+    expect(summary).toEqual({
+      reviewCount: 2,
+      totalInputTokens: 1500,
+      totalOutputTokens: 300,
+      totalDurationMs: 8000,
+      jobCountByStatus: { SUCCEEDED: 2, PENDING: 1 },
+    });
+  });
+
+  it('returns all-zero for a repository with no review history', async () => {
+    const repository = await makeRepository(db);
+    expect(await getRepositoryUsageSummary(db, repository.id)).toEqual({
+      reviewCount: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalDurationMs: 0,
+      jobCountByStatus: {},
+    });
   });
 });

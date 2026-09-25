@@ -7,7 +7,7 @@ consults a dependency graph of the repository (what the changed files
 import and what depends on them), lets an AI agent fetch the related code
 it needs, and posts validated findings as inline review comments.
 
-> **Status:** Phase 13b (web app: read-only dashboard). Opening a pull request
+> **Status:** Phase 13c (web app: settings and BYOK). Opening a pull request
 > queues a review job. `MODEL_PROVIDER` picks which of Gemini, OpenAI,
 > Anthropic or Groq actually runs it (only that provider's API key needs to
 > be set); a repo's own `.coderexic.yml` can pick a different *configured*

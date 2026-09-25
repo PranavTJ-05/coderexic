@@ -57,6 +57,7 @@ export function ReviewDetail({ repositoryId, jobId }: { repositoryId: string; jo
         <Muted>
           {review.headSha.slice(0, 12)}
           {review.provider ? ` - ${review.provider}/${review.model}` : ''}
+          {review.errorCode ? ` - ${review.errorCode}` : ''}
         </Muted>
       </div>
 

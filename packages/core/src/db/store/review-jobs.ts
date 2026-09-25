@@ -356,3 +356,54 @@ export async function findReviewWithFindings(
     .orderBy(reviewFindings.filename, reviewFindings.startLine);
   return { job, review, findings };
 }
+
+export interface RepositoryUsageSummary {
+  reviewCount: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalDurationMs: number;
+  jobCountByStatus: Partial<Record<ReviewJobStatus, number>>;
+}
+
+/**
+ * Token/duration sums and a job-status breakdown for a repository's whole
+ * history (Phase 13c's usage page) - real data, not a placeholder: `reviews`
+ * already stores `inputTokens`/`outputTokens`/`durationMs` per review (both
+ * the one-shot and agent-loop paths set them when the model reports usage).
+ * Token/duration sums only count reviews that actually reported usage
+ * (`inputTokens`/`outputTokens`/`durationMs` all nullable) - a `SUCCEEDED`
+ * count from `jobCountByStatus` can therefore exceed how many reviews
+ * contributed to the token sums.
+ */
+export async function getRepositoryUsageSummary(
+  db: Executor,
+  repositoryId: string,
+): Promise<RepositoryUsageSummary> {
+  const [totals] = await db
+    .select({
+      reviewCount: sql<number>`count(${reviews.id})::int`,
+      totalInputTokens: sql<number>`coalesce(sum(${reviews.inputTokens}), 0)::int`,
+      totalOutputTokens: sql<number>`coalesce(sum(${reviews.outputTokens}), 0)::int`,
+      totalDurationMs: sql<number>`coalesce(sum(${reviews.durationMs}), 0)::int`,
+    })
+    .from(reviews)
+    .innerJoin(reviewJobs, eq(reviewJobs.id, reviews.reviewJobId))
+    .where(eq(reviewJobs.repositoryId, repositoryId));
+
+  const statusRows = await db
+    .select({ status: reviewJobs.status, count: sql<number>`count(*)::int` })
+    .from(reviewJobs)
+    .where(eq(reviewJobs.repositoryId, repositoryId))
+    .groupBy(reviewJobs.status);
+
+  const jobCountByStatus: Partial<Record<ReviewJobStatus, number>> = {};
+  for (const row of statusRows) jobCountByStatus[row.status] = row.count;
+
+  return {
+    reviewCount: totals?.reviewCount ?? 0,
+    totalInputTokens: totals?.totalInputTokens ?? 0,
+    totalOutputTokens: totals?.totalOutputTokens ?? 0,
+    totalDurationMs: totals?.totalDurationMs ?? 0,
+    jobCountByStatus,
+  };
+}

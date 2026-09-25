@@ -31,6 +31,15 @@ export const webEnvSchema = baseEnvSchema.extend({
    * install link is rendered server-side and passed down as a plain href.
    */
   GITHUB_APP_SLUG: z.string().min(1).optional(),
+  /**
+   * Optional, matching `apps/worker`'s own `MODEL_CREDENTIALS_MASTER_KEYS`
+   * (must be the *same* value in both - it's what encrypts a BYOK key
+   * written here and what the worker decrypts it with at review time).
+   * When unset, the BYOK credential write routes are disabled rather than
+   * accepting a key this deployment could never actually decrypt again.
+   */
+  MODEL_CREDENTIALS_MASTER_KEYS: z.string().min(1).optional(),
+  MODEL_CREDENTIALS_KEY_VERSION: z.coerce.number().int().min(1).default(1),
 });
 export type WebEnv = z.infer<typeof webEnvSchema>;
 

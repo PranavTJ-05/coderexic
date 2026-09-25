@@ -1,0 +1,1 @@
+ALTER TABLE "repository_settings" ADD CONSTRAINT "repository_settings_model_provider_ck" CHECK ("repository_settings"."model_provider" IN ('gemini', 'openai', 'anthropic', 'groq'));
