@@ -1,35 +1,18 @@
 import 'server-only';
-import {
-  createDatabase,
-  GitHubUserAccessError,
-  listAuthorizedRepositories,
-  type DatabaseHandle,
-} from '@coderexic/core';
-import { getToken } from 'next-auth/jwt';
+import { GitHubUserAccessError, listAuthorizedRepositories } from '@coderexic/core';
 import { NextResponse, type NextRequest } from 'next/server';
-import { loadWebEnv } from '../../../src/env';
-
-let handle: DatabaseHandle | undefined;
-/**
- * Built lazily, not at module scope: `next build` statically imports route
- * modules to "collect page data", which must succeed without real secrets
- * present (see `src/auth.ts`'s `getAuthOptions` for the same reasoning).
- */
-function db(): DatabaseHandle {
-  handle ??= createDatabase({ url: loadWebEnv().DATABASE_URL });
-  return handle;
-}
+import { db } from '../../../src/db';
+import { getAccessToken } from '../../../src/session';
 
 /**
  * The repositories this signed-in user is authorized to see (Phase 13a).
- * Reads the GitHub access token straight off the encrypted session JWT via
- * `getToken` - it's never exposed on the `session` object client JS can
- * read from `/api/auth/session`, only decodable here with `AUTH_SECRET`.
+ * `/api/dashboard` (Phase 13b) is what the dashboard UI actually calls -
+ * it wraps this same authorization check with per-repository index/review
+ * status. This route is kept as the minimal, UI-independent version of the
+ * same check.
  */
 export async function GET(req: NextRequest) {
-  const env = loadWebEnv();
-  const token = await getToken({ req, secret: env.AUTH_SECRET });
-  const accessToken = token?.githubAccessToken;
+  const accessToken = await getAccessToken(req);
   if (!accessToken) {
     return NextResponse.json({ error: 'not signed in' }, { status: 401 });
   }

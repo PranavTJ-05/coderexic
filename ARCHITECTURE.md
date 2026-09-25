@@ -95,6 +95,51 @@ into folders.
   member only ever sees the subset of an "all repositories" install that
   their own GitHub permissions actually grant (PRODUCT_SPEC.md §17.10).
 
+### Decisions made while implementing (Phase 13b)
+- **Every repo/review page route re-derives authorization from GitHub, by
+  ID, never by trusting the URL.** `/repositories/[repositoryId]` uses
+  `findAuthorizedRepository` (a thin wrapper over `listAuthorizedRepositories`
+  filtered to one id); `/reviews/[jobId]`'s `findAuthorizedReviewJob` checks
+  the job's *own* `repositoryId`, not whatever repository the linking page
+  happened to be on - otherwise a user authorized for repo A could read repo
+  B's findings by pasting repo B's job id into a repo-A URL. Both live in
+  `packages/core` (not a route handler) specifically so they're
+  integration-testable the same way `listAuthorizedRepositories` already
+  is - `tests/integration/db/dashboard.test.ts` has explicit cross-repo and
+  removed-repository cases. A "not found or not authorized" case is always a
+  plain 404, never a 403, so existence never leaks.
+- **Repositories are routed by `repositoryId` (the app's own UUID), never by
+  `owner/name`.** `repositories.fullName` has a non-unique index, not a
+  unique constraint, and goes stale on a GitHub rename - the same reason
+  `listAuthorizedRepositories` never matches by `owner_login`.
+- **API routes return explicit DTOs (`apps/web/src/dto.ts`), never DB rows
+  or `AuthorizedRepository` spread directly.** A column added to the schema
+  later can't leak to the client just by existing; it has to be added to a
+  `to*Dto` mapper on purpose.
+- **LLM-authored text (review summaries, finding descriptions) is rendered
+  as plain text (`whitespace-pre-wrap`), never as markdown or
+  `dangerouslySetInnerHTML`.** Model output is untrusted (§1, §13) even
+  when it's ours to display, not just when it's a tool input.
+- **The GitHub App install link is never round-tripped through a
+  `setup_action`/`installation_id` query param.** GitHub's install flow can
+  redirect back with those params, but they're client-suppliable and
+  therefore not trusted for anything - the dashboard always re-derives "what
+  am I authorized for" via `listAuthorizedRepositories` on load, exactly as
+  it would on any other visit. The install link itself is built from
+  `GITHUB_APP_SLUG` (optional; the dashboard's empty state degrades to no
+  link when it's unset) rather than a `NEXT_PUBLIC_*` var, since Next
+  inlines `NEXT_PUBLIC_*` at `next build` time - a build with the var unset
+  would bake in `undefined` for every later deploy until the next rebuild.
+- **Tailwind v4 (via `@tailwindcss/postcss`) + hand-authored, shadcn-style
+  primitives**, not the `shadcn` CLI's generated files. Verified by actually
+  running `shadcn@latest init` first: it requires Tailwind and an import
+  alias to already exist and does neither itself, and `apps/web`'s
+  convention is extension-less relative imports rather than a `@/*` alias -
+  adding one just for the CLI was more churn than it was worth for a
+  handful of components. `apps/web/src/components/ui.tsx` matches shadcn's
+  visual language (Tailwind utilities + `cva` variants + a `cn()` helper)
+  by hand instead.
+
 ## 5. GitHub integration
 Wrap GitHub in a `GitHubClient` abstraction. Nothing else in the app depends
 on Octokit request details.

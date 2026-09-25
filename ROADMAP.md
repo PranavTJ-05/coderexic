@@ -879,10 +879,76 @@ whichever later phase actually deploys the web app.
 ### Phase 13b: read-only dashboard
 **Pages:** Landing page, Onboarding, Repository installation, Dashboard,
 Repository page, Review history.
+- [x] Landing page - `app/page.tsx`. Signed out: hero + sign-in CTA.
+      Signed in: server-redirects to `/dashboard`.
+- [x] Dashboard - `app/dashboard/page.tsx` + `repo-list.tsx` (client
+      component, same client-fetch convention as Phase 13a's original repo
+      list). Calls the new `/api/dashboard`, which wraps
+      `listAuthorizedRepositories` with each repository's index status and
+      most recent review job. Empty state links to the GitHub App's
+      install page and calls out the install-webhook race ("just
+      installed? refresh").
+- [x] Repository page - `app/repositories/[repositoryId]/page.tsx` +
+      `detail.tsx`. Repo settings summary (model provider/name, minimum
+      severity) plus a paginated ("load more") review history, from the
+      new `/api/repositories/[repositoryId]`.
+- [x] Review history - folded into the repository page above rather than
+      a separate route, plus a dedicated per-review page
+      (`app/repositories/[repositoryId]/reviews/[jobId]`) for a review's
+      full findings list, from the new `/api/reviews/[jobId]`.
+- **Onboarding / Repository installation - folded into GitHub's own
+  flow, not built as separate pages here.** A deliberate scope call the
+  user should feel free to overrule: `https://github.com/apps/<slug>/
+  installations/new` (GitHub's own install page) already *is* the
+  installation UX, and this app's role is only to link to it (the
+  dashboard's empty state) and to react to the resulting webhook (already
+  built - Phase 3/6). No install-callback page reads or trusts a
+  `setup_action`/`installation_id` query param - see ARCHITECTURE.md's
+  Phase 13b decisions. If a dedicated in-app onboarding page (e.g. a
+  post-first-sign-in checklist) turns out to be wanted, it's a cheap
+  addition on top of what's here.
 
-Not started. Tailwind + shadcn/ui (ARCHITECTURE §21) land here, once
-there's an actual design surface to style - 13a deliberately shipped
-unstyled.
+**New `packages/core` read paths** (all integration-tested in the new
+`tests/integration/db/dashboard.test.ts`):
+- `db/store/review-jobs.ts`: `listReviewJobsForRepository` (paginated,
+  each job paired with its review and finding count in one query),
+  `findLatestReviewJobForRepository`, `findReviewWithFindings`.
+- `github/user-access.ts`: `findAuthorizedRepository` and
+  `findAuthorizedReviewJob` - the authorization check every new route
+  uses, including the cross-repo case (a job id from a repository the
+  caller isn't authorized for) and the removed-repository case.
+
+**Architecture decisions** (recorded in ARCHITECTURE.md's Phase 13b
+section): routing by `repositoryId` (not `owner/name`), authorization
+checks living in `packages/core` rather than route handlers so they're
+testable, explicit DTOs instead of returning DB rows, plain-text
+rendering of LLM output, never trusting a GitHub install-flow query param,
+and hand-authored Tailwind/shadcn-style primitives instead of the `shadcn`
+CLI (which needs Tailwind and an import alias already configured - tried
+first, confirmed it does neither itself).
+
+**Browser-unverified**, same caveat as Phase 13a - and more so here: no
+authenticated request in this phase ever got back a 200 with real data.
+Confirmed via `next build` (succeeds with zero env vars) and `next start`
+against a real test Postgres, with a forged-but-validly-signed session
+JWT (`next-auth/jwt`'s own `encode`, sharing `AUTH_SECRET`) to exercise
+the authenticated paths: `/` renders 200 (unauthenticated landing);
+`/dashboard`, `/repositories/[id]` and `/repositories/[id]/reviews/[id]`
+all correctly 307-redirect to `/` when *signed out*; `/api/dashboard` et
+al. correctly 401 when signed out and correctly map a real GitHub 401
+(the forged token is naturally invalid to GitHub's API, so this exercised
+the actual `GitHubUserAccessError` path end to end, not a mock) to `401
+{error: "sign in again"}` when signed in with that forged token - and a
+grep of `.next/static/css` for classes actually used in the source,
+confirming Tailwind's class detection works in this monorepo layout. The
+DTO mapping and the actual page rendering with real data (a genuinely
+authorized GitHub token) are exercised only by the `packages/core`
+integration tests, never over HTTP. Never opened in an actual browser.
+
+**Done when:** `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm
+test` (318 tests), `pnpm test:integration` (169 tests, +10 in the new
+`dashboard.test.ts`), and `pnpm build` all pass - verified from a clean
+`packages/core/dist` (a fresh clone's state).
 
 ### Phase 13c: settings and BYOK
 **Pages:** Settings, Model settings, Review rules, Usage.

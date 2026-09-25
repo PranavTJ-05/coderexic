@@ -336,9 +336,10 @@ compiles core first, then apps against core's `dist/`.
   only (`token.githubAccessToken`) and never copied onto `session` in the
   `session` callback, since anything on `session` is readable by client
   JS via `/api/auth/session`; it's decoded server-side only via
-  `getToken` in a Route Handler (`app/api/repos/route.ts`), which is why
-  the authorized-repo list is fetched from a small client component
-  (`app/repo-list.tsx`) rather than rendered in the page's Server
+  `getToken` in a Route Handler (`apps/web/src/session.ts`'s
+  `getAccessToken`, shared by every API route that needs it), which is why
+  every authorized-data page (dashboard, repository, review) fetches from a
+  small client component rather than rendering in the page's Server
   Component - `getToken` needs a real `NextRequest`, which a Server
   Component doesn't have without a hack.
 - `packages/core/src/github/user-access.ts`'s `listAuthorizedRepositories`
@@ -360,6 +361,41 @@ compiles core first, then apps against core's `dist/`.
   OAuth callback to the wrong place. `apps/web`'s dev/start scripts pin a
   fixed port (`:3001`) rather than relying on `next dev`'s default, to
   match.
+- **Every route that takes a repository or review id in its URL
+  re-derives authorization from GitHub, never trusts the id** -
+  `packages/core/src/github/user-access.ts`'s `findAuthorizedRepository`
+  and `findAuthorizedReviewJob`, both integration-tested including the
+  cross-repo case (a review job id from a repository the caller isn't
+  authorized for must never resolve, even if the caller is legitimately
+  authorized for some *other* repository). Repositories are routed by
+  `repositoryId` (the app's own UUID) rather than `owner/name` -
+  `repositories.fullName` isn't unique and goes stale on a GitHub rename.
+  A failed check is always a plain 404 (never 403), so existence never
+  leaks.
+- API routes map DB rows to explicit response shapes
+  (`apps/web/src/dto.ts`'s `to*Dto` functions) rather than returning rows
+  directly - a schema column added later can't leak to the client without
+  a matching mapper change.
+- Model-authored text (review summaries, finding descriptions) is always
+  rendered as plain text (`whitespace-pre-wrap`), never markdown-to-HTML or
+  `dangerouslySetInnerHTML` - it's untrusted the same way a repo's own
+  instructions are (§13).
+- Tailwind v4 (`@tailwindcss/postcss`) plus hand-authored, shadcn-style
+  primitives in `apps/web/src/components/ui.tsx` (Tailwind utilities +
+  `cva` variants + a `cn()` helper from `apps/web/src/lib/cn.ts`) - not the
+  `shadcn` CLI's generated files. Confirmed by actually running
+  `shadcn@latest init`: it needs Tailwind and an import alias already
+  configured and does neither itself, and `apps/web` uses extension-less
+  relative imports rather than a `@/*` alias, so adding one just for the
+  CLI wasn't worth it for a handful of components.
+- The GitHub App's install link (`apps/web/src/install-url.ts`) is built
+  from a server-only `GITHUB_APP_SLUG` env var, not `NEXT_PUBLIC_*` -
+  Next inlines `NEXT_PUBLIC_*` at `next build` time, so a build made
+  before the var was set would bake in `undefined` for every deploy until
+  the next rebuild. The install flow's return leg (a `setup_action`/
+  `installation_id` query param GitHub may redirect back with) is never
+  read or trusted - the dashboard just re-derives authorization from
+  `listAuthorizedRepositories` on load, the same as any other visit.
 
 ## Commands
 

@@ -1,6 +1,8 @@
+import { z } from 'zod';
 import type { Executor } from '../db/client.js';
 import { findInstallationByGithubId } from '../db/store/installations.js';
 import { findRepository } from '../db/store/repositories.js';
+import { findReviewJobById, type ReviewJob } from '../db/store/review-jobs.js';
 
 /**
  * A `listAuthorizedRepositories` call failed against GitHub's API itself -
@@ -117,4 +119,53 @@ export async function listAuthorizedRepositories(
     }
   }
   return results;
+}
+
+/**
+ * A single repository from `listAuthorizedRepositories`, for a route that
+ * already knows which repository it wants (e.g. `/repos/[repositoryId]`)
+ * rather than needing the whole list. Still makes the full GitHub round
+ * trip - there's no cheaper authorized check than "ask GitHub" - but
+ * callers that already have the list (the dashboard) should filter it
+ * client-side instead of calling this per repository.
+ */
+export async function findAuthorizedRepository(
+  db: Executor,
+  userAccessToken: string,
+  repositoryId: string,
+  fetchImpl: typeof globalThis.fetch = globalThis.fetch,
+): Promise<AuthorizedRepository | undefined> {
+  const repos = await listAuthorizedRepositories(db, userAccessToken, fetchImpl);
+  return repos.find((repo) => repo.repositoryId === repositoryId);
+}
+
+/**
+ * A review job, only if the signed-in user is authorized for *the job's
+ * own* repository - not the repository named in whatever URL the caller
+ * came from. Prevents a user authorized for repo A from reading repo B's
+ * findings by pasting repo B's job id into repo A's URL. Returns
+ * `undefined` (never a distinct "forbidden" signal) both when the job
+ * doesn't exist and when it isn't authorized, so a route can 404 either
+ * way without leaking which case it was.
+ */
+export async function findAuthorizedReviewJob(
+  db: Executor,
+  userAccessToken: string,
+  reviewJobId: string,
+  fetchImpl: typeof globalThis.fetch = globalThis.fetch,
+): Promise<ReviewJob | undefined> {
+  // reviewJobs.id is a uuid column - an ill-formed id (e.g. from a route
+  // param a caller can type anything into) would otherwise reach Postgres
+  // as `invalid input syntax for type uuid`, a 500 instead of the 404 an
+  // unauthorized/nonexistent id gets.
+  if (!z.uuid().safeParse(reviewJobId).success) return undefined;
+  const job = await findReviewJobById(db, reviewJobId);
+  if (!job) return undefined;
+  const authorized = await findAuthorizedRepository(
+    db,
+    userAccessToken,
+    job.repositoryId,
+    fetchImpl,
+  );
+  return authorized ? job : undefined;
 }

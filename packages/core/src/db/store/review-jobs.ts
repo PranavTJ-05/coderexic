@@ -1,4 +1,4 @@
-import { and, eq, gt, inArray, lt, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, lt, ne, sql } from 'drizzle-orm';
 import type { Executor } from '../client.js';
 import {
   reviewFindings,
@@ -8,6 +8,13 @@ import {
   type ReviewStatus,
   type ReviewTrigger,
 } from '../schema.js';
+
+/** One row of `listReviewJobsForRepository` - the dashboard/review-history read model. */
+export interface ReviewJobSummary {
+  job: ReviewJob;
+  review: Review | null;
+  findingsCount: number;
+}
 
 export type ReviewJob = typeof reviewJobs.$inferSelect;
 export type Review = typeof reviews.$inferSelect;
@@ -289,4 +296,63 @@ export async function completeReview(
       throw new Error(`completeReview: review job ${reviewJobId} not found`);
     return { review: storedReview, findings: storedFindings };
   });
+}
+
+/** The most recently created review job for a repository, for the dashboard's per-repo status. */
+export async function findLatestReviewJobForRepository(
+  db: Executor,
+  repositoryId: string,
+): Promise<ReviewJobSummary | undefined> {
+  const rows = await listReviewJobsForRepository(db, repositoryId, { limit: 1 });
+  return rows[0];
+}
+
+/**
+ * Review jobs for a repository, newest first, each paired with its review
+ * (null until the worker finishes) and finding count - one query per page
+ * rather than N+1 per job. `repositoryId` is caller-supplied and must
+ * already be authorization-checked (see `findAuthorizedRepository`); this
+ * function does not re-check it.
+ */
+export async function listReviewJobsForRepository(
+  db: Executor,
+  repositoryId: string,
+  options: { limit?: number; offset?: number } = {},
+): Promise<ReviewJobSummary[]> {
+  const { limit = 20, offset = 0 } = options;
+  const rows = await db
+    .select({
+      job: reviewJobs,
+      review: reviews,
+      findingsCount: sql<number>`count(${reviewFindings.id})::int`,
+    })
+    .from(reviewJobs)
+    .leftJoin(reviews, eq(reviews.reviewJobId, reviewJobs.id))
+    .leftJoin(reviewFindings, eq(reviewFindings.reviewId, reviews.id))
+    .where(eq(reviewJobs.repositoryId, repositoryId))
+    .groupBy(reviewJobs.id, reviews.id)
+    // id as a tiebreaker: two jobs can share a createdAt (same millisecond),
+    // and ordering on createdAt alone would let offset-based pagination
+    // skip or duplicate a row across pages when that happens.
+    .orderBy(desc(reviewJobs.createdAt), desc(reviewJobs.id))
+    .limit(limit)
+    .offset(offset);
+  return rows;
+}
+
+/** A review with its findings, for the review-detail page. Findings are ordered by file, then line. */
+export async function findReviewWithFindings(
+  db: Executor,
+  reviewJobId: string,
+): Promise<{ job: ReviewJob; review: Review; findings: ReviewFinding[] } | undefined> {
+  const [job] = await db.select().from(reviewJobs).where(eq(reviewJobs.id, reviewJobId));
+  if (!job) return undefined;
+  const [review] = await db.select().from(reviews).where(eq(reviews.reviewJobId, reviewJobId));
+  if (!review) return undefined;
+  const findings = await db
+    .select()
+    .from(reviewFindings)
+    .where(eq(reviewFindings.reviewId, review.id))
+    .orderBy(reviewFindings.filename, reviewFindings.startLine);
+  return { job, review, findings };
 }
