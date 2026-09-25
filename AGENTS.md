@@ -296,13 +296,13 @@ compiles core first, then apps against core's `dist/`.
   and once in the pipeline after the real head sha is known (`headSha` +
   `excludeId`, catches a manual job racing an automatic job to the same
   commit). Rejections (unauthorized commenter, already in flight, PR
-  closed) are **silent** - by explicit product decision, this phase doesn't
-  post an acknowledgment or rejection comment, since that needs `Issues:
-  write` (confirmed via GitHub's docs: the issue-comment endpoints require
-  `Issues`, not `Pull requests`, permission even when the target is a PR),
-  which PRODUCT_SPEC §7.1 doesn't grant. A successful manual review's only
-  status report is the review itself, posted the same way an automatic
-  review's is.
+  closed) are **silent** - a deliberate product decision made this phase
+  (not a permission constraint: GitHub's docs list "create an issue
+  comment" under *both* the Issues and Pull requests permission sections,
+  so the existing `Pull requests: write` is actually enough to post a plain
+  comment on a PR). A successful manual review's only status report is the
+  review itself, posted the same way an automatic review's is; posting an
+  ack/rejection comment too is a small, cheap follow-up if wanted later.
 
 ## Commands
 

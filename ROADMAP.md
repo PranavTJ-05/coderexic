@@ -686,13 +686,16 @@ New unit tests: 13 in `crypto/credential-crypto.test.ts`, 5 in
       PRODUCT_SPEC.md §14, even for a head sha already reviewed
       automatically.
 - [x] Status reporting - **by explicit product decision, no extra GitHub
-      comments this phase.** A successful manual review posts as a normal
-      PR review, exactly like an automatic one (existing `Pull requests:
-      write` permission). Posting a plain acknowledgment or rejection
-      comment would need `Issues: write` (verified: GitHub's issue-comment
-      endpoints require `Issues`, not `Pull requests`, permission even when
-      the target is a PR), which PRODUCT_SPEC §7.1 doesn't grant and which
-      would force every installed instance to re-accept a wider permission.
+      comments this phase**, made on a premise that turned out to be wrong
+      and was corrected after the fact: `POST
+      /repos/{owner}/{repo}/issues/{issue_number}/comments` (create an
+      issue comment) is listed under GitHub's docs **both** as an "Issues"
+      permission endpoint and as a "Pull requests" permission endpoint, so
+      the existing `Pull requests: write` permission (already granted,
+      PRODUCT_SPEC §7.1) is actually enough to post a plain comment on a
+      PR - no `Issues: write` upgrade needed, and no re-accept required on
+      any installation. A successful manual review posts as a normal PR
+      review either way (existing `Pull requests: write` permission).
       Rejections and failures are visible in `webhook_events` and
       `review_jobs` (and Phase 13's dashboard, eventually) but nothing is
       posted back to the PR for them.
@@ -711,7 +714,7 @@ New unit tests: 13 in `crypto/credential-crypto.test.ts`, 5 in
 **Done when:** `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test`
 (316 tests: +9 for `hasReviewCommand`, +2 for the fenced-code-block cases),
 `pnpm test:integration` (150 tests: the `issue_comment` suite grew from 1 to
-12 tests, +4 new tests in `tests/integration/worker-pipeline.test.ts` for
+11 tests, +4 new tests in `tests/integration/worker-pipeline.test.ts` for
 the manual-trigger path), and `pnpm build` all pass.
 
 ## Phase 13: Web application
