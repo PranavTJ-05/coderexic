@@ -946,7 +946,7 @@ authorized GitHub token) are exercised only by the `packages/core`
 integration tests, never over HTTP. Never opened in an actual browser.
 
 **Done when:** `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm
-test` (318 tests), `pnpm test:integration` (169 tests, +10 in the new
+test` (318 tests), `pnpm test:integration` (170 tests, +11 in the new
 `dashboard.test.ts`), and `pnpm build` all pass - verified from a clean
 `packages/core/dist` (a fresh clone's state).
 
