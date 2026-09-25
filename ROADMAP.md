@@ -647,13 +647,75 @@ New unit tests: 13 in `crypto/credential-crypto.test.ts`, 5 in
 
 ## Phase 12: Re-review
 **Goal:** developers can trigger a new review by hand.
-- [ ] Issue comment webhook
-- [ ] Command parser
-- [ ] `/review review`
-- [ ] Authorization
-- [ ] Duplicate prevention
-- [ ] New review record
-- [ ] Status reporting
+- [x] Issue comment webhook - `apps/api/src/webhooks/handlers.ts`'s `onIssueComment`,
+      registered in the existing `HANDLERS` table (was already a stub since
+      Phase 3). Only `action: 'created'` is handled - edits never re-trigger.
+- [x] Command parser - `packages/core/src/github/commands.ts`'s
+      `hasReviewCommand` (9 unit tests). Matches an unquoted, unfenced
+      `/review review` line, case-insensitive; skips `>`-quoted reply lines
+      and fenced code blocks (so quoting or documenting the command doesn't
+      trigger it).
+- [x] `/review review` - the only recognized command this phase.
+- [x] Authorization - `comment.author_association` (added to
+      `issueCommentEventSchema` as `.optional()`; confirmed present on real
+      GitHub comment payloads via `gh api`) allow-listed to `OWNER`, `MEMBER`,
+      `COLLABORATOR`. A missing association and a `Bot` comment author (so
+      the app itself, or another bot, can never trigger it) are both treated
+      as unauthorized. Rejections are **silent** (`ignored`, logged, no
+      reply) - see "Status reporting" below for why.
+- [x] Duplicate prevention - `db/store/review-jobs.ts`'s `findActiveReviewJob`
+      covers two cases beyond the existing per-head-sha idempotency key
+      (which only dedupes automatic-vs-automatic):
+      1. A second `/review review` while one is already PENDING/RUNNING for
+         the same PR is ignored at the webhook handler (no job created).
+      2. A manual job and an automatic job can still race to the same real
+         head sha (comment, then push, before the comment's job resolves
+         its placeholder sha) - `apps/worker/src/review/pipeline.ts` checks
+         again once each job's real head sha is known and cancels the loser
+         (`DUPLICATE_ACTIVE_REVIEW`).
+      Both checks are bounded by `ACTIVE_JOB_WINDOW_MS` (30 minutes) so a
+      row a crashed worker never reached a terminal status for doesn't
+      block re-review on that PR forever.
+      **Known residual race (accepted, not fixed):** two comments landing
+      in the same instant can both pass the webhook handler's check before
+      either creates its job, since there's no DB-level lock across it -
+      closing that needs a stronger primitive than this phase's checks.
+- [x] New review record - a manual job never reuses an automatic job's
+      idempotency key (`manual:<delivery id>` vs. `automatic:<repo>:<PR>:<head
+      sha>`), so each `/review review` creates its own `review_jobs` row per
+      PRODUCT_SPEC.md §14, even for a head sha already reviewed
+      automatically.
+- [x] Status reporting - **by explicit product decision, no extra GitHub
+      comments this phase**, made on a premise that turned out to be wrong
+      and was corrected after the fact: `POST
+      /repos/{owner}/{repo}/issues/{issue_number}/comments` (create an
+      issue comment) is listed under GitHub's docs **both** as an "Issues"
+      permission endpoint and as a "Pull requests" permission endpoint, so
+      the existing `Pull requests: write` permission (already granted,
+      PRODUCT_SPEC §7.1) is actually enough to post a plain comment on a
+      PR - no `Issues: write` upgrade needed, and no re-accept required on
+      any installation. A successful manual review posts as a normal PR
+      review either way (existing `Pull requests: write` permission).
+      Rejections and failures are visible in `webhook_events` and
+      `review_jobs` (and Phase 13's dashboard, eventually) but nothing is
+      posted back to the PR for them.
+
+**Manual-trigger specifics** (`apps/worker/src/review/pipeline.ts`):
+- A manual job is created with a placeholder head sha (`ZERO_SHA`, an
+  all-zero 40-hex sha - the webhook handler that creates it never calls the
+  GitHub API), overwritten via `updateReviewJobHeadSha` once the worker
+  fetches the real pull request.
+- Manual jobs **skip the superseded and draft checks** an automatic job
+  goes through - a deliberate choice: an explicit `/review review` beats
+  the automatic-trigger policy those checks exist for. A closed pull
+  request is still rejected either way (checked again at both the webhook
+  handler and the worker).
+
+**Done when:** `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm test`
+(316 tests: +9 for `hasReviewCommand`, +2 for the fenced-code-block cases),
+`pnpm test:integration` (150 tests: the `issue_comment` suite grew from 1 to
+11 tests, +4 new tests in `tests/integration/worker-pipeline.test.ts` for
+the manual-trigger path), and `pnpm build` all pass.
 
 ## Phase 13: Web application
 **Goal:** the hosted product experience.

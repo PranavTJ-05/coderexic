@@ -7,7 +7,7 @@ consults a dependency graph of the repository (what the changed files
 import and what depends on them), lets an AI agent fetch the related code
 it needs, and posts validated findings as inline review comments.
 
-> **Status:** Phase 11 (BYOK - DB and crypto layer). Opening a pull request
+> **Status:** Phase 12 (re-review on demand). Opening a pull request
 > queues a review job. `MODEL_PROVIDER` picks which of Gemini, OpenAI,
 > Anthropic or Groq actually runs it (only that provider's API key needs to
 > be set); a repo's own `.coderexic.yml` can pick a different *configured*
@@ -30,7 +30,9 @@ it needs, and posts validated findings as inline review comments.
 > keys, rotation and soft deletion, and a `repo > user > system` resolution
 > function - but this phase is DB and crypto only, exercised through direct
 > store calls and tests, since there's no web app or auth yet to expose it
-> through. See [ROADMAP.md](ROADMAP.md).
+> through. A collaborator can also comment `/review review` on an open pull
+> request to trigger a fresh review by hand, independent of the automatic
+> per-push dedup. See [ROADMAP.md](ROADMAP.md).
 
 ## Requirements
 

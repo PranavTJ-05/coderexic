@@ -2,10 +2,13 @@ import {
   createIndexRun,
   createReviewJob,
   automaticReviewKey,
+  manualReviewKey,
   upsertInstallation,
   upsertRepository,
+  ZERO_SHA,
   type Executor,
 } from '@coderexic/core';
+import { randomUUID } from 'node:crypto';
 
 let counter = 0;
 const next = () => ++counter;
@@ -40,6 +43,22 @@ export async function makeReviewJob(db: Executor, headSha = 'a'.repeat(40)) {
     headSha,
     triggerType: 'automatic',
     idempotencyKey: automaticReviewKey(repository.id, 7, headSha),
+  });
+  return { repository, job };
+}
+
+/** A manual (`/review review`) job, as the issue_comment webhook handler creates it: a placeholder headSha. */
+export async function makeManualReviewJob(db: Executor, pullRequestNumber = 7) {
+  const repository = await makeRepository(db);
+  const deliveryId = randomUUID();
+  const { job } = await createReviewJob(db, {
+    repositoryId: repository.id,
+    installationId: repository.installationId,
+    pullRequestNumber,
+    headSha: ZERO_SHA,
+    triggerType: 'manual',
+    idempotencyKey: manualReviewKey(deliveryId),
+    githubEventId: deliveryId,
   });
   return { repository, job };
 }

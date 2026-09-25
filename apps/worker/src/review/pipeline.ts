@@ -1,4 +1,5 @@
 import {
+  ACTIVE_JOB_WINDOW_MS,
   AGENT_SYSTEM_PROMPT,
   AgentToolExecutor,
   buildAgentPrompt,
@@ -16,6 +17,7 @@ import {
   failReviewJob,
   filterBySeverity,
   filterIgnoredPaths,
+  findActiveReviewJob,
   findInstallationById,
   findRepositoryById,
   getRepositorySettings,
@@ -32,6 +34,7 @@ import {
   ReviewContextCache,
   selectReviewableFiles,
   startReview,
+  updateReviewJobHeadSha,
   type AgentAdapter,
   type Database,
   type DiffBudget,
@@ -128,6 +131,7 @@ const SKIP_REASON = {
   superseded: 'SUPERSEDED_BY_NEWER_COMMIT',
   draft: 'DRAFT_PULL_REQUEST',
   closed: 'PULL_REQUEST_CLOSED',
+  duplicateActive: 'DUPLICATE_ACTIVE_REVIEW',
 } as const;
 
 /**
@@ -179,17 +183,46 @@ export async function processReviewJob(
     const ref = { owner: repository.ownerLogin, repo: repository.name };
 
     const pr = await client.getPullRequest(ref, claimed.pullRequestNumber);
-    if (pr.headSha !== claimed.headSha) {
+    const isManual = claimed.triggerType === 'manual';
+    if (isManual) {
+      // A manual job is created with a placeholder head sha (the webhook
+      // handler that creates it never calls the GitHub API); record the
+      // real one now that it's known. Manual jobs also skip the superseded
+      // and draft checks below - an explicit /review review command beats
+      // the automatic-trigger policy those checks exist for (ROADMAP.md
+      // Phase 12).
+      await updateReviewJobHeadSha(db, reviewJobId, pr.headSha, pr.baseSha);
+    } else if (pr.headSha !== claimed.headSha) {
       // A newer push already created (or will create) the job that covers it.
       await cancelReviewJob(db, reviewJobId, SKIP_REASON.superseded);
       return;
     }
-    if (pr.draft) {
+    if (!isManual && pr.draft) {
       await cancelReviewJob(db, reviewJobId, SKIP_REASON.draft);
       return;
     }
     if (pr.state !== 'open') {
       await cancelReviewJob(db, reviewJobId, SKIP_REASON.closed);
+      return;
+    }
+
+    // A manual comment and a push can race to the same real head sha (the
+    // comment's job resolves its placeholder sha to Y just as a push
+    // creates the automatic job for Y). The per-head-sha idempotency key
+    // only dedupes automatic-vs-automatic; this catches manual-vs-automatic
+    // and manual-vs-manual once each side's real head sha is known. A
+    // narrower race remains if both jobs reach this check before either
+    // cancels (ROADMAP.md Phase 12) - accepted, not fixed, since closing it
+    // needs a DB-level lock this check doesn't have.
+    const duplicate = await findActiveReviewJob(
+      db,
+      repository.id,
+      claimed.pullRequestNumber,
+      new Date(Date.now() - ACTIVE_JOB_WINDOW_MS),
+      { headSha: pr.headSha, excludeId: reviewJobId },
+    );
+    if (duplicate) {
+      await cancelReviewJob(db, reviewJobId, SKIP_REASON.duplicateActive);
       return;
     }
 

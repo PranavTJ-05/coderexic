@@ -1,6 +1,9 @@
 import {
+  automaticReviewKey,
+  claimReviewJob,
   createIndexQueue,
   createLogger,
+  createReviewJob,
   createReviewQueue,
   ignorePatterns,
   indexRuns,
@@ -22,7 +25,7 @@ import { eq } from 'drizzle-orm';
 import { describe, expect, it, vi } from 'vitest';
 import { processReviewJob } from '../../apps/worker/src/review/pipeline.js';
 import { createReviewWorker } from '../../apps/worker/src/worker.js';
-import { makeReviewJob } from './db/fixtures.js';
+import { makeManualReviewJob, makeReviewJob } from './db/fixtures.js';
 import { useTestDatabase } from './helpers/db.js';
 import { useTestRedis } from './helpers/redis.js';
 
@@ -271,6 +274,103 @@ describe('worker: processReviewJob', () => {
       status: 'CANCELLED',
       errorCode: 'SUPERSEDED_BY_NEWER_COMMIT',
     });
+  });
+
+  it('a manual job resolves its placeholder head sha instead of being cancelled as superseded', async () => {
+    const { job } = await makeManualReviewJob(db);
+    const client = fakeClient(); // pull request headSha defaults to 'a'.repeat(40), never matching the job's ZERO_SHA placeholder
+    const deps = {
+      db,
+      githubApp: fakeGithubApp(client),
+      model: fakeModel(FINDING_OUTPUT),
+      provider: 'test',
+      modelName: 'm',
+      logger,
+    };
+
+    await processReviewJob(deps, job.id);
+
+    expect(client.createReviewCalls).toHaveLength(1);
+    const [storedJob] = await db.select().from(reviewJobs).where(eq(reviewJobs.id, job.id));
+    expect(storedJob).toMatchObject({ status: 'SUCCEEDED', headSha: 'a'.repeat(40) });
+    const [storedReview] = await db.select().from(reviews).where(eq(reviews.reviewJobId, job.id));
+    expect(storedReview).toMatchObject({ status: 'SUCCEEDED' });
+  });
+
+  it('a manual job on a draft pull request is still reviewed (an explicit request beats the automatic policy)', async () => {
+    const { job } = await makeManualReviewJob(db);
+    const client = fakeClient({ pullRequest: { draft: true } });
+    const deps = {
+      db,
+      githubApp: fakeGithubApp(client),
+      model: fakeModel(FINDING_OUTPUT),
+      provider: 'test',
+      modelName: 'm',
+      logger,
+    };
+
+    await processReviewJob(deps, job.id);
+
+    expect(client.createReviewCalls).toHaveLength(1);
+    const [storedJob] = await db.select().from(reviewJobs).where(eq(reviewJobs.id, job.id));
+    expect(storedJob).toMatchObject({ status: 'SUCCEEDED' });
+  });
+
+  it('a manual job on a closed pull request is still cancelled', async () => {
+    const { job } = await makeManualReviewJob(db);
+    const client = fakeClient({ pullRequest: { state: 'closed' } });
+    const deps = {
+      db,
+      githubApp: fakeGithubApp(client),
+      model: fakeModel(FINDING_OUTPUT),
+      provider: 'test',
+      modelName: 'm',
+      logger,
+    };
+
+    await processReviewJob(deps, job.id);
+
+    expect(client.createReviewCalls).toHaveLength(0);
+    const [storedJob] = await db.select().from(reviewJobs).where(eq(reviewJobs.id, job.id));
+    expect(storedJob).toMatchObject({ status: 'CANCELLED', errorCode: 'PULL_REQUEST_CLOSED' });
+  });
+
+  it('a manual job racing an automatic job for the same real head sha is cancelled as a duplicate', async () => {
+    const { repository, job: manualJob } = await makeManualReviewJob(db);
+    const headSha = 'a'.repeat(40); // fakeClient()'s default pull request head sha
+    const { job: automaticJob } = await createReviewJob(db, {
+      repositoryId: repository.id,
+      installationId: repository.installationId,
+      pullRequestNumber: manualJob.pullRequestNumber,
+      headSha,
+      triggerType: 'automatic',
+      idempotencyKey: automaticReviewKey(repository.id, manualJob.pullRequestNumber, headSha),
+    });
+    const client = fakeClient();
+    const deps = {
+      db,
+      githubApp: fakeGithubApp(client),
+      model: fakeModel(FINDING_OUTPUT),
+      provider: 'test',
+      modelName: 'm',
+      logger,
+    };
+
+    // The automatic job claims (RUNNING) but hasn't completed yet - the
+    // in-flight state a real race would produce - when the manual job's
+    // real head sha (resolved from its placeholder) turns out to match it.
+    await claimReviewJob(db, automaticJob.id);
+    await processReviewJob(deps, manualJob.id);
+
+    const [storedManual] = await db
+      .select()
+      .from(reviewJobs)
+      .where(eq(reviewJobs.id, manualJob.id));
+    expect(storedManual).toMatchObject({
+      status: 'CANCELLED',
+      errorCode: 'DUPLICATE_ACTIVE_REVIEW',
+    });
+    expect(client.createReviewCalls).toHaveLength(0);
   });
 
   it('marks the job FAILED with a MODEL_ERROR code when the model call fails', async () => {

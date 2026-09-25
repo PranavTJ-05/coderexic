@@ -3,3 +3,4 @@ export * from './config.js';
 export * from './signature.js';
 export * from './client.js';
 export * from './events.js';
+export * from './commands.js';

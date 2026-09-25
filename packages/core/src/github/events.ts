@@ -66,6 +66,7 @@ export const issueCommentEventSchema = z.object({
   repository,
   issue: z.object({
     number: z.number().int().positive(),
+    state: z.string(),
     /** Present only when the issue is a pull request. */
     pull_request: z.object({}).optional(),
   }),
@@ -73,6 +74,11 @@ export const issueCommentEventSchema = z.object({
     id: z.number().int().positive(),
     body: z.string(),
     user: account,
+    /**
+     * `.optional()`, not required: an absent value is treated as
+     * unauthorized by the handler, not rejected as a bad payload.
+     */
+    author_association: z.string().optional(),
   }),
 });
 
