@@ -3,6 +3,7 @@ import {
   claimReviewJob,
   createIndexQueue,
   createLogger,
+  createMetrics,
   createReviewJob,
   createReviewQueue,
   ignorePatterns,
@@ -895,6 +896,73 @@ describe('worker: processReviewJob', () => {
 
     const runs = await db.select().from(indexRuns).where(eq(indexRuns.repositoryId, repository.id));
     expect(runs).toHaveLength(0);
+  });
+
+  describe('metrics (ROADMAP.md Phase 14)', () => {
+    it('records a review outcome and model token usage on success', async () => {
+      const { job } = await makeReviewJob(db);
+      const client = fakeClient();
+      const metrics = createMetrics();
+      const deps = {
+        db,
+        githubApp: fakeGithubApp(client),
+        model: fakeModel({ ...FINDING_OUTPUT }),
+        provider: 'test-provider',
+        modelName: 'test-model',
+        logger,
+        metrics,
+      };
+
+      await processReviewJob(deps, job.id);
+
+      const text = await metrics.registry.metrics();
+      expect(text).toMatch(
+        /coderexic_review_duration_seconds_count\{status="SUCCEEDED",provider="test-provider",mode="one_shot"\} 1/,
+      );
+    });
+
+    it('records an error and a FAILED review outcome when the model call fails', async () => {
+      const { job } = await makeReviewJob(db);
+      const client = fakeClient();
+      const metrics = createMetrics();
+      const deps = {
+        db,
+        githubApp: fakeGithubApp(client),
+        model: throwingModel(new ModelHttpError('quota exceeded', 429)),
+        provider: 'test',
+        modelName: 'm',
+        logger,
+        metrics,
+      };
+
+      await processReviewJob(deps, job.id);
+
+      const text = await metrics.registry.metrics();
+      expect(text).toMatch(/coderexic_errors_total\{code="MODEL_ERROR"\} 1/);
+      expect(text).toMatch(
+        /coderexic_review_duration_seconds_count\{status="FAILED",provider="test",mode="one_shot"\} 1/,
+      );
+    });
+
+    it('never labels a metric with the reviewJobId, PR number or a raw URL', async () => {
+      const { job } = await makeReviewJob(db);
+      const client = fakeClient();
+      const metrics = createMetrics();
+      const deps = {
+        db,
+        githubApp: fakeGithubApp(client),
+        model: fakeModel({ ...FINDING_OUTPUT }),
+        provider: 'test-provider',
+        modelName: 'test-model',
+        logger,
+        metrics,
+      };
+
+      await processReviewJob(deps, job.id);
+
+      const text = await metrics.registry.metrics();
+      expect(text).not.toContain(job.id);
+    });
   });
 });
 

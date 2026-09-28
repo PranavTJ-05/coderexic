@@ -1,5 +1,6 @@
 import {
   createIndexQueue,
+  createNoopMetrics,
   createReviewQueue,
   createReviewQueueWorker,
   enqueueReviewJob,
@@ -10,6 +11,7 @@ import {
   type IndexQueueJob,
   type Logger,
   type MasterKeyMap,
+  type Metrics,
   type ProviderRegistry,
   type ReviewModel,
   type ReviewQueueJob,
@@ -38,6 +40,8 @@ export interface ReviewWorkerDeps {
    * deployment's own configured providers, exactly as before Phase 13c.
    */
   masterKeys?: MasterKeyMap;
+  /** ROADMAP.md Phase 14. Defaults to a no-op instance. */
+  metrics?: Metrics;
   concurrency?: number;
   /** How often the stale-job sweep runs. */
   sweepIntervalMs?: number;
@@ -85,6 +89,9 @@ export function createReviewWorker(deps: ReviewWorkerDeps): Worker {
       running = true;
       queue = createReviewQueue(deps.connection);
       indexQueue = createIndexQueue(deps.connection);
+      const metrics = deps.metrics ?? createNoopMetrics();
+      metrics.registerQueue('review-jobs', queue);
+      metrics.registerQueue('index-runs', indexQueue);
       consumer = createReviewQueueWorker(
         deps.connection,
         (job) =>
@@ -96,6 +103,7 @@ export function createReviewWorker(deps: ReviewWorkerDeps): Worker {
               provider: deps.provider,
               modelName: deps.modelName,
               logger: deps.logger,
+              metrics,
               ...(indexQueue !== undefined && { indexQueue }),
               ...(deps.agentAdapter !== undefined && { agentAdapter: deps.agentAdapter }),
               ...(deps.providers !== undefined && { providers: deps.providers }),

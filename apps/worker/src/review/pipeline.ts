@@ -11,6 +11,7 @@ import {
   completeReview,
   createAgentRun,
   createIndexRun,
+  createNoopMetrics,
   DEFAULT_DIFF_BUDGET,
   dedupeFindings,
   enqueueIndexRun,
@@ -45,6 +46,7 @@ import {
   type IndexQueueJob,
   type Logger,
   type MasterKeyMap,
+  type Metrics,
   type ModelReviewOutput,
   type ParsedRepositoryConfig,
   type PRFile,
@@ -77,6 +79,8 @@ export interface ReviewPipelineDeps {
   provider: string;
   modelName: string;
   logger: Logger;
+  /** ROADMAP.md Phase 14. Defaults to a no-op instance, so tests that don't care about metrics need not pass one. */
+  metrics?: Metrics;
   diffBudget?: DiffBudget;
   /**
    * Lets a review that finds its repo un-indexed at the PR's base sha kick
@@ -203,6 +207,7 @@ export async function processReviewJob(
   reviewJobId: string,
 ): Promise<void> {
   const { db, githubApp, model, provider, modelName, logger } = deps;
+  const metrics = deps.metrics ?? createNoopMetrics();
   const budget = deps.diffBudget ?? DEFAULT_DIFF_BUDGET;
   const log = logger.child({ reviewJobId });
   const startedAt = Date.now();
@@ -219,6 +224,7 @@ export async function processReviewJob(
       findInstallationById(db, claimed.installationId),
     ]);
     if (!repository || !installation) {
+      metrics.recordError('REPOSITORY_NOT_FOUND');
       await failReviewJob(db, reviewJobId, 'FAILED', 'REPOSITORY_NOT_FOUND');
       return;
     }
@@ -347,6 +353,7 @@ export async function processReviewJob(
       } catch (err) {
         if (err instanceof ProviderCredentialResolutionError) {
           log.error({ err, provider: requestedProvider }, 'BYOK credential resolution failed');
+          metrics.recordError('BYOK_CREDENTIAL_ERROR');
           await failReviewJob(db, reviewJobId, 'FAILED', 'BYOK_CREDENTIAL_ERROR', err.message);
           return;
         }
@@ -388,6 +395,13 @@ export async function processReviewJob(
     );
 
     if (selection.files.length === 0) {
+      const durationMs = Date.now() - startedAt;
+      metrics.recordReviewOutcome({
+        status: 'SUCCEEDED',
+        provider: resolvedProvider,
+        mode: resolvedAgentAdapter ? 'agent' : 'one_shot',
+        durationMs,
+      });
       await completeReview(db, {
         reviewJobId,
         jobStatus: 'SUCCEEDED',
@@ -400,7 +414,7 @@ export async function processReviewJob(
           filesFetched: 0,
           agentTurns: 0,
           toolCalls: 0,
-          durationMs: Date.now() - startedAt,
+          durationMs,
         },
         findings: [],
       });
@@ -420,6 +434,7 @@ export async function processReviewJob(
         inputTokens?: number;
         outputTokens?: number;
       },
+      mode: 'one_shot' | 'agent',
     ): Promise<void> {
       const ignoreFiltered = filterIgnoredPaths(output.reviews, ignoreGlobs);
       const deduped = dedupeFindings(filterBySeverity(ignoreFiltered, minimumSeverity));
@@ -435,6 +450,21 @@ export async function processReviewJob(
           : output.summary;
 
       const publishError = await publishReview(client, ref, pr, reviewJobId, summary, built, log);
+      const durationMs = Date.now() - startedAt;
+
+      metrics.recordModelUsage({
+        provider: resolvedProvider,
+        model: resolvedModelName,
+        ...(counts.inputTokens !== undefined && { inputTokens: counts.inputTokens }),
+        ...(counts.outputTokens !== undefined && { outputTokens: counts.outputTokens }),
+      });
+      metrics.recordReviewOutcome({
+        status: publishError ? 'FAILED' : 'SUCCEEDED',
+        provider: resolvedProvider,
+        mode,
+        durationMs,
+      });
+      if (publishError) metrics.recordError('GITHUB_PUBLISH_ERROR');
 
       await completeReview(db, {
         reviewJobId,
@@ -448,7 +478,7 @@ export async function processReviewJob(
           filesFetched: counts.filesFetched,
           agentTurns: counts.agentTurns,
           toolCalls: counts.toolCalls,
-          durationMs: Date.now() - startedAt,
+          durationMs,
           ...(counts.inputTokens !== undefined && { inputTokens: counts.inputTokens }),
           ...(counts.outputTokens !== undefined && { outputTokens: counts.outputTokens }),
         },
@@ -480,9 +510,10 @@ export async function processReviewJob(
         reviewJobId,
         startedAt,
         log,
+        metrics,
         ...(deps.maxTurns !== undefined && { maxTurns: deps.maxTurns }),
         ...(deps.maxFileFetches !== undefined && { maxFileFetches: deps.maxFileFetches }),
-        publishAndComplete,
+        publishAndComplete: (output, counts) => publishAndComplete(output, counts, 'agent'),
       });
       return;
     }
@@ -508,17 +539,43 @@ export async function processReviewJob(
         { signal: controller.signal },
       );
 
-      await publishAndComplete(output, {
-        filesFetched: selection.files.length,
-        agentTurns: 1,
-        toolCalls: 0,
-      });
+      await publishAndComplete(
+        output,
+        {
+          filesFetched: selection.files.length,
+          agentTurns: 1,
+          toolCalls: 0,
+        },
+        'one_shot',
+      );
     } catch (err) {
+      const durationMs = Date.now() - startedAt;
       if (err instanceof ModelTimeoutError) {
+        metrics.recordError('TIMEOUT');
+        metrics.recordReviewOutcome({
+          status: 'TIMED_OUT',
+          provider: resolvedProvider,
+          mode: 'one_shot',
+          durationMs,
+        });
         await failReviewJob(db, reviewJobId, 'TIMED_OUT', 'TIMEOUT', err.message);
       } else if (err instanceof ModelInvalidOutputError) {
+        metrics.recordError('INVALID_OUTPUT');
+        metrics.recordReviewOutcome({
+          status: 'FAILED',
+          provider: resolvedProvider,
+          mode: 'one_shot',
+          durationMs,
+        });
         await failReviewJob(db, reviewJobId, 'FAILED', 'INVALID_OUTPUT', err.message);
       } else if (err instanceof ModelError) {
+        metrics.recordError('MODEL_ERROR');
+        metrics.recordReviewOutcome({
+          status: 'FAILED',
+          provider: resolvedProvider,
+          mode: 'one_shot',
+          durationMs,
+        });
         await failReviewJob(db, reviewJobId, 'FAILED', 'MODEL_ERROR', err.message);
       } else {
         throw err;
@@ -528,6 +585,7 @@ export async function processReviewJob(
     }
   } catch (err) {
     log.error({ err }, 'review job failed unexpectedly');
+    metrics.recordError('UNEXPECTED_ERROR');
     await failReviewJob(
       db,
       reviewJobId,
@@ -560,6 +618,7 @@ interface AgentBranchContext {
   reviewJobId: string;
   startedAt: number;
   log: Logger;
+  metrics: Metrics;
   maxTurns?: number;
   maxFileFetches?: number;
   publishAndComplete: (
@@ -586,7 +645,7 @@ interface AgentBranchContext {
  * unmarked either).
  */
 async function runAgentBranch(agentAdapter: AgentAdapter, ctx: AgentBranchContext): Promise<void> {
-  const { db, client, ref, pr, repository, files, selection, config, settings, log } = ctx;
+  const { db, client, ref, pr, repository, files, selection, config, settings, log, metrics } = ctx;
   const changedPaths = selection.files.map((f) => f.filename);
   const removedPaths = [
     ...files.filter((f) => f.status === 'removed').map((f) => f.filename),
@@ -651,6 +710,7 @@ async function runAgentBranch(agentAdapter: AgentAdapter, ctx: AgentBranchContex
       ...(ctx.maxFileFetches !== undefined && { maxFileFetches: ctx.maxFileFetches }),
       onToolCall: async (event) => {
         toolCallCount += 1;
+        metrics.recordToolCall({ tool: event.toolCall.name, status: event.result.status });
         await recordAgentToolCall(db, {
           agentRunId: agentRun.id,
           turnNumber: event.turnNumber,
@@ -669,6 +729,11 @@ async function runAgentBranch(agentAdapter: AgentAdapter, ctx: AgentBranchContex
       turnCount: loopResult.turnCount,
       fileFetchCount: loopResult.fileFetchCount,
     });
+    metrics.recordAgentRun({
+      turnCount: loopResult.turnCount,
+      fileFetchCount: loopResult.fileFetchCount,
+      terminationReason: loopResult.terminationReason,
+    });
 
     if (loopResult.status === 'SUCCEEDED' && loopResult.output) {
       await ctx.publishAndComplete(loopResult.output, {
@@ -685,6 +750,13 @@ async function runAgentBranch(agentAdapter: AgentAdapter, ctx: AgentBranchContex
       { terminationReason: loopResult.terminationReason, turnCount: loopResult.turnCount },
       'agent review did not complete with a submitted review',
     );
+    metrics.recordError(loopResult.terminationReason);
+    metrics.recordReviewOutcome({
+      status: loopResult.status,
+      provider: ctx.provider,
+      mode: 'agent',
+      durationMs: Date.now() - ctx.startedAt,
+    });
     await completeReview(db, {
       reviewJobId: ctx.reviewJobId,
       jobStatus: loopResult.status === 'TIMED_OUT' ? 'TIMED_OUT' : 'FAILED',
@@ -708,6 +780,13 @@ async function runAgentBranch(agentAdapter: AgentAdapter, ctx: AgentBranchContex
     // created stuck RUNNING forever (AI_AGENT_SPEC.md §14 cuts both ways: a run that
     // didn't finish must never look successful, and must never look unfinished either).
     log.error({ err }, 'agent review branch failed unexpectedly');
+    metrics.recordError('UNEXPECTED_ERROR');
+    metrics.recordReviewOutcome({
+      status: 'FAILED',
+      provider: ctx.provider,
+      mode: 'agent',
+      durationMs: Date.now() - ctx.startedAt,
+    });
     await completeAgentRun(db, agentRun.id, {
       status: 'FAILED',
       terminationReason: 'MODEL_ERROR',

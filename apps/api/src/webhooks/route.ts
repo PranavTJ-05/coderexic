@@ -1,4 +1,5 @@
 import {
+  createNoopMetrics,
   enqueueIndexRun,
   enqueueReviewJob,
   markWebhookEvent,
@@ -6,6 +7,7 @@ import {
   verifyWebhookSignature,
   type Database,
   type IndexQueueJob,
+  type Metrics,
   type ReviewQueueJob,
 } from '@coderexic/core';
 import type { Queue } from 'bullmq';
@@ -22,6 +24,7 @@ export interface WebhookRouteOptions {
   reviewQueue: Queue<ReviewQueueJob>;
   /** Enqueues index runs after their creating transaction commits. */
   indexQueue: Queue<IndexQueueJob>;
+  metrics?: Metrics;
 }
 
 function header(value: string | string[] | undefined): string | undefined {
@@ -36,7 +39,7 @@ function header(value: string | string[] | undefined): string | undefined {
  */
 export async function registerWebhookRoutes(
   app: FastifyInstance,
-  { db, secret, reviewQueue, indexQueue }: WebhookRouteOptions,
+  { db, secret, reviewQueue, indexQueue, metrics = createNoopMetrics() }: WebhookRouteOptions,
 ): Promise<void> {
   await app.register((scope, _options, done) => {
     // The signature covers the exact bytes GitHub sent, so keep the raw body.
@@ -52,17 +55,26 @@ export async function registerWebhookRoutes(
     scope.post('/webhooks/github', { bodyLimit: WEBHOOK_BODY_LIMIT }, async (request, reply) => {
       const rawBody = request.body;
       if (!Buffer.isBuffer(rawBody)) {
+        metrics.recordWebhookDelivery({ event: 'unverified', action: null, outcome: 'invalid' });
         return reply.code(400).send({ error: 'expected a JSON body' });
       }
       if (
         !verifyWebhookSignature(secret, rawBody, header(request.headers['x-hub-signature-256']))
       ) {
+        // x-github-event is attacker-controlled before the signature is verified;
+        // never use it as a metric label here.
         request.log.warn('webhook signature rejected');
+        metrics.recordWebhookDelivery({ event: 'unverified', action: null, outcome: 'unverified' });
         return reply.code(401).send({ error: 'invalid signature' });
       }
       const eventName = header(request.headers['x-github-event']);
       const deliveryId = header(request.headers['x-github-delivery']);
       if (!eventName || !deliveryId) {
+        metrics.recordWebhookDelivery({
+          event: eventName ?? 'unknown',
+          action: null,
+          outcome: 'invalid',
+        });
         return reply.code(400).send({ error: 'missing GitHub event headers' });
       }
 
@@ -70,6 +82,7 @@ export async function registerWebhookRoutes(
       try {
         payload = JSON.parse(rawBody.toString('utf8'));
       } catch {
+        metrics.recordWebhookDelivery({ event: eventName, action: null, outcome: 'invalid' });
         return reply.code(400).send({ error: 'body is not valid JSON' });
       }
       const action =
@@ -91,6 +104,7 @@ export async function registerWebhookRoutes(
         (event.deliveryStatus === 'PROCESSED' || event.deliveryStatus === 'IGNORED')
       ) {
         log.info('duplicate delivery acknowledged');
+        metrics.recordWebhookDelivery({ event: eventName, action, outcome: 'duplicate' });
         return { status: 'duplicate' };
       }
 
@@ -117,14 +131,21 @@ export async function registerWebhookRoutes(
             log.error({ err, indexRunId: outcome.indexRunId }, 'failed to enqueue index run');
           });
         }
+        metrics.recordWebhookDelivery({
+          event: eventName,
+          action,
+          outcome: outcome.status.toLowerCase(),
+        });
         return { status: outcome.status.toLowerCase() };
       } catch (err) {
         await markWebhookEvent(db, event.id, 'FAILED');
         if (err instanceof WebhookPayloadError) {
           log.warn('webhook payload failed validation');
+          metrics.recordWebhookDelivery({ event: eventName, action, outcome: 'invalid' });
           return reply.code(400).send({ error: err.message });
         }
         log.error({ err }, 'webhook processing failed');
+        metrics.recordWebhookDelivery({ event: eventName, action, outcome: 'failed' });
         return reply.code(500).send({ error: 'processing failed' });
       }
     });

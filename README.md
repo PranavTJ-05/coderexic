@@ -68,6 +68,21 @@ docker compose up --build
 curl http://127.0.0.1:3000/health
 ```
 
+## Observability
+
+Both `api` and `worker` expose Prometheus metrics at `/metrics` (the worker
+also gets its own `/health`, on `METRICS_PORT`, default `9091`, since it has
+no other HTTP surface). `/metrics` is bearer-token gated: set `METRICS_TOKEN`
+on the process (same value on both, or different, they're independent) and
+send `Authorization: Bearer <token>`. Leaving `METRICS_TOKEN` unset means
+`/metrics` isn't registered at all on the API and always answers 404 on the
+worker - it's never exposed unauthenticated by default.
+
+```bash
+curl -H "Authorization: Bearer $METRICS_TOKEN" http://127.0.0.1:3000/metrics       # api
+curl -H "Authorization: Bearer $METRICS_TOKEN" http://127.0.0.1:9091/metrics       # worker
+```
+
 ## Development commands
 
 | Command             | What it does                                  |

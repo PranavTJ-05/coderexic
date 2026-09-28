@@ -16,8 +16,9 @@
   },
   "dependencies": {
     "@coderexic/core": "workspace:*",
+    "bullmq": "^6.3.8",
     "fastify": "^5.12.5",
-    "zod": "^4.6.5",
-    "bullmq": "^6.3.8"
+    "ioredis": "^6.0.0",
+    "zod": "^4.6.5"
   }
 }
