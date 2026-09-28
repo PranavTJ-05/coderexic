@@ -96,6 +96,8 @@ curl -H "Authorization: Bearer $METRICS_TOKEN" http://127.0.0.1:9091/metrics    
 | `pnpm github:smoke` | Check GitHub App access against a real repo   |
 | `pnpm build`        | Compile core, then apps, to `dist/`           |
 | `pnpm format`       | Prettier write (`format:check` in CI)         |
+| `pnpm eval`         | Run the Phase 15 eval harness against a built-in scripted oracle (no API key, no spend) |
+| `pnpm eval:live`    | Run the eval harness against a real provider - costs real money, needs `--provider` and `--i-understand-this-spends-real-money` |
 
 ## Layout
 

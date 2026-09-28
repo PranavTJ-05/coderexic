@@ -1115,20 +1115,53 @@ decision, not part of this phase.
 
 ## Phase 15: Evaluation system
 **Goal:** measure review quality.
-- [ ] Fixture repos
-- [ ] Known-bug PRs
-- [ ] False-positive cases
-- [ ] Expected findings
-- [ ] Automated evaluation runner
-- [ ] Precision
-- [ ] Recall
-- [ ] Line accuracy
-- [ ] Severity accuracy
-- [ ] Cost per review
-- [ ] Latency
+- [x] Fixture repos (`packages/core/src/evaluation/fixtures/`: 37 self-contained
+      synthetic PR diffs, `PRFile[]`-shaped, hunks starting at varied line
+      numbers with no-op lines before the bug, so a model that just points
+      at "new code" can't score well - see the guesser tests below)
+- [x] Known-bug PRs (27 cases: off-by-one, missing await, null deref, SQL/command
+      injection, leaked resources, wrong comparators, XSS, hardcoded secrets,
+      weak crypto, races, a two-file/two-finding case, a decoy-file case, and
+      more - mostly TS/JS with a Go and a Python case)
+- [x] False-positive cases (10 traps: code that looks suspicious but is correct)
+- [x] Expected findings (file, line range, severity, description per case)
+- [x] Automated evaluation runner (`pnpm eval`/`pnpm eval:scripted`,
+      `pnpm eval:live`; `apps/worker/src/scripts/eval-run.ts`)
+- [x] Precision (machinery: `scoreCase`/`aggregateReport`, unit-tested)
+- [x] Recall (machinery: same)
+- [x] Line accuracy (machinery: same, matched pairs only)
+- [x] Severity accuracy (machinery: same, matched pairs only)
+- [x] Cost per review (machinery: `computeCostUsd` against an explicit
+      `--prices` table; `null`/"n/a" rather than a guessed number when no
+      table or no token usage is available)
+- [x] Latency (machinery: `durationMs` per case, `avgDurationMs` in the report)
 
 Start with 25–50 cases. Never claim the reviewer is good based on a handful
 of personal PRs.
+
+Every case is scored through the *same* post-processing pipeline production
+uses (`filterIgnoredPaths` -> `filterBySeverity` -> `dedupeFindings` ->
+`placeFindings`, mirroring `apps/worker/src/review/pipeline.ts`'s
+`publishAndComplete`), and a fixture-validation test asserts every expected
+finding actually survives that pipeline (lands on an added line, inside one
+diff hunk) so recall can't silently be wrong for the whole suite.
+
+Two "guesser" tests guard the fixtures themselves against measuring the
+wrong thing: a model that always points at the first added line of the
+first changed file scores recall=0, precision=0 across all 37 cases (it
+would score much higher if bugs all sat at a fixed offset), and a model
+that reports one giant range spanning a whole hunk gets full recall but
+lineAccuracy=0 - precision/recall alone can't penalize an overly vague
+prediction, which is exactly what lineAccuracy is for.
+
+**No real-model baseline has been measured yet.** Everything above is the
+harness and its fixtures, proven correct with `pnpm eval:scripted` (a
+built-in scripted oracle, no API key, no network calls, no spend) and unit
+tests of the scoring functions. Running the harness against a real model
+(`pnpm eval:live --provider <name> --i-understand-this-spends-real-money`)
+calls a live provider API and costs real money - do not run it, and do not
+report a precision/recall number anywhere, without the user's explicit
+go-ahead first.
 
 ## Phase 16: Security hardening
 **Goal:** ready for real repos.
