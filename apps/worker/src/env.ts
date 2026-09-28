@@ -52,6 +52,10 @@ export const workerEnvSchema = baseEnvSchema
      * logged once at startup rather than silently.
      */
     MODEL_CREDENTIALS_MASTER_KEYS: z.string().min(1).optional(),
+    /** Port for the worker's `/health` + `/metrics` HTTP listener (ROADMAP.md Phase 14). */
+    METRICS_PORT: z.coerce.number().int().min(1).max(65535).default(9091),
+    /** Bearer token required to read `/metrics`. Unset means `/metrics` always answers 404. */
+    METRICS_TOKEN: z.string().min(16).optional(),
   })
   .superRefine((data, ctx) => {
     const REQUIRED_KEY: Record<SupportedModelProvider, keyof typeof data> = {

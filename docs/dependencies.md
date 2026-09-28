@@ -221,3 +221,31 @@ Webhook signature verification uses `node:crypto`, not a library.
 4. **Local dev / production:** no configuration.
 5. **Can we remove it?** Yes, confined to `apps/web/src/lib/cn.ts` and
    `apps/web/src/components/ui.tsx`.
+
+## prom-client (Phase 14)
+1. **What problem does it solve?** Prometheus-format counters, histograms and
+   gauges for webhook deliveries, queue depth, agent runs, model token usage,
+   review/HTTP latency and error counts, served at `/metrics`.
+2. **Why not the existing stack?** Nothing in the stack exposes metrics; the
+   pino structured logs (Phase 1) are for individual events, not aggregated
+   counts/histograms a scraper can graph or alert on. `prom-client` is the
+   de facto standard client for Node, with correct histogram bucketing and
+   text-format encoding already handled.
+3. **Operational cost:** none by itself - it's an in-process library. Scraping
+   `/metrics` is the operator's responsibility (a Prometheus server or
+   equivalent); nothing here requires one to exist. Each `buildServer`/
+   `createReviewWorker` call creates its own `Registry` (never the package's
+   global default register), so building either repeatedly - as the test
+   suite does - never throws "metric already registered."
+4. **Local dev:** `/metrics` on the API and the worker's own `/metrics`
+   listener (`METRICS_PORT`, default 9091) are both bearer-token gated via
+   `METRICS_TOKEN`; leaving it unset means `/metrics` isn't registered at all
+   (API) or always answers 404 (worker), so a deployment that hasn't set up
+   scraping never exposes it unauthenticated by default.
+5. **Production:** point a Prometheus server (or compatible scraper) at
+   `/metrics` on both processes with the configured bearer token.
+6. **Can we remove it?** Yes. Confined to `packages/core/src/metrics/`,
+   `apps/api/src/server.ts`/`webhooks/route.ts`, and
+   `apps/worker/src/review/pipeline.ts`/`worker.ts`/`metrics-server.ts`;
+   every call site defaults to a no-op `Metrics` instance
+   (`createNoopMetrics`) when none is passed.

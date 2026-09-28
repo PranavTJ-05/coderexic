@@ -4,6 +4,7 @@ import {
   createDatabase,
   createGitHubApp,
   createLogger,
+  createMetrics,
   createRedisConnection,
   loadGitHubAppCredentials,
   loadModelCredentialsConfig,
@@ -11,10 +12,27 @@ import {
 } from '@coderexic/core';
 import { loadWorkerEnv } from './env.js';
 import { createIndexWorker } from './index-run/worker.js';
+import { createMetricsServer } from './metrics-server.js';
 import { createReviewWorker } from './worker.js';
 
 const env = loadWorkerEnv();
 const logger = createLogger({ name: 'worker', level: env.LOG_LEVEL });
+
+// A crash the BullMQ worker's own error handling never sees must still be
+// logged before the process dies (ROADMAP.md Phase 14: error tracking).
+process.on('unhandledRejection', (reason) => {
+  logger.fatal({ err: reason }, 'unhandled rejection');
+});
+process.on('uncaughtException', (err) => {
+  logger.fatal({ err }, 'uncaught exception');
+});
+
+const metrics = createMetrics();
+const metricsServer = createMetricsServer({
+  metrics,
+  logger,
+  ...(env.METRICS_TOKEN && { metricsToken: env.METRICS_TOKEN }),
+});
 
 const database = createDatabase({ url: env.DATABASE_URL });
 const redis = createRedisConnection(env.REDIS_URL);
@@ -101,6 +119,7 @@ const worker = createReviewWorker({
   modelName: defaultEntry.modelName,
   providers,
   ...(modelCredentialsConfig && { masterKeys: modelCredentialsConfig.masterKeys }),
+  metrics,
   concurrency: env.REVIEW_CONCURRENCY,
 });
 
@@ -118,7 +137,7 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
   shuttingDown = true;
   logger.info({ signal }, 'shutting down');
   try {
-    await Promise.all([worker.stop(), indexWorker.stop()]);
+    await Promise.all([worker.stop(), indexWorker.stop(), metricsServer.stop()]);
     await database.close();
     redis.disconnect();
     process.exit(0);
@@ -132,7 +151,7 @@ process.on('SIGTERM', (signal) => void shutdown(signal));
 process.on('SIGINT', (signal) => void shutdown(signal));
 
 try {
-  await Promise.all([worker.start(), indexWorker.start()]);
+  await Promise.all([worker.start(), indexWorker.start(), metricsServer.start(env.METRICS_PORT)]);
 } catch (err) {
   logger.fatal({ err }, 'failed to start worker');
   process.exit(1);

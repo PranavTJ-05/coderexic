@@ -2,6 +2,7 @@ import {
   createDatabase,
   createIndexQueue,
   createLogger,
+  createMetrics,
   createRedisConnection,
   createReviewQueue,
 } from '@coderexic/core';
@@ -10,17 +11,33 @@ import { buildServer } from './server.js';
 
 const env = loadApiEnv();
 const logger = createLogger({ name: 'api', level: env.LOG_LEVEL });
+
+// A crash Fastify's own error handling never sees (e.g. a rejected promise in
+// a `void`-called background task) must still be logged before the process
+// dies, so it shows up as more than a silent restart (ROADMAP.md Phase 14:
+// error tracking).
+process.on('unhandledRejection', (reason) => {
+  logger.fatal({ err: reason }, 'unhandled rejection');
+});
+process.on('uncaughtException', (err) => {
+  logger.fatal({ err }, 'uncaught exception');
+});
+
 const database = createDatabase({ url: env.DATABASE_URL });
 const redis = createRedisConnection(env.REDIS_URL);
 const reviewQueue = createReviewQueue(redis);
 const indexQueue = createIndexQueue(redis);
+const metrics = createMetrics();
 const app = await buildServer({
   logger,
   version: process.env.npm_package_version ?? '0.0.0',
   database,
+  redis,
   webhookSecret: env.GITHUB_WEBHOOK_SECRET,
   reviewQueue,
   indexQueue,
+  metrics,
+  ...(env.METRICS_TOKEN && { metricsToken: env.METRICS_TOKEN }),
 });
 
 let shuttingDown = false;

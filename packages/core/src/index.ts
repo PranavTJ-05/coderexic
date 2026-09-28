@@ -10,3 +10,4 @@ export * from './graph/index.js';
 export * from './context/index.js';
 export * from './agent/index.js';
 export * from './crypto/index.js';
+export * from './metrics/index.js';

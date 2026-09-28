@@ -1091,16 +1091,27 @@ still standing).
 
 ## Phase 14: Observability
 **Goal:** understand the system in production.
-- [ ] Structured logs
-- [ ] Request IDs
-- [ ] Review IDs
-- [ ] Webhook metrics
-- [ ] Queue metrics
-- [ ] Agent metrics
-- [ ] Model usage
-- [ ] Latency metrics
-- [ ] Error tracking
-- [ ] Health checks
+- [x] Structured logs
+- [x] Request IDs
+- [x] Review IDs
+- [x] Webhook metrics
+- [x] Queue metrics
+- [x] Agent metrics
+- [x] Model usage
+- [x] Latency metrics
+- [x] Error tracking
+- [x] Health checks
+
+Metrics are `prom-client`, one `Registry` per `buildServer`/`createReviewWorker`
+instance (never the global default register), exposed at `/metrics` behind an
+optional bearer token (`METRICS_TOKEN`) so a deployment that hasn't set up
+scraping never exposes it unauthenticated by default. The worker has no other
+HTTP surface, so it gets a minimal `node:http` listener (`METRICS_PORT`) for
+`/health` and `/metrics` - it previously had no health check at all. Error
+tracking here is a `coderexic_errors_total{code}` counter plus
+`unhandledRejection`/`uncaughtException` handlers that log at `fatal`; a
+third-party error-tracking SaaS (Sentry or similar) is a Phase 18 deployment
+decision, not part of this phase.
 
 ## Phase 15: Evaluation system
 **Goal:** measure review quality.

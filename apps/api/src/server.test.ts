@@ -1,5 +1,5 @@
 import { Writable } from 'node:stream';
-import { createLogger } from '@coderexic/core';
+import { createLogger, createMetrics, createNoopMetrics } from '@coderexic/core';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadApiEnv } from './env.js';
 import { buildServer } from './server.js';
@@ -42,6 +42,96 @@ describe('GET /ready', () => {
     app = await buildServer({ logger: silent });
     const res = await app.inject({ method: 'GET', url: '/ready' });
     expect(res.json()).toEqual({ status: 'ready' });
+  });
+});
+
+describe('GET /ready', () => {
+  it('is unavailable when a configured redis check fails, without checking the database', async () => {
+    app = await buildServer({
+      logger: silent,
+      redis: { ping: () => Promise.reject(new Error('down')) } as never,
+    });
+    const res = await app.inject({ method: 'GET', url: '/ready' });
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toEqual({ status: 'unavailable', dependency: 'redis' });
+  });
+
+  it('is ready when a configured redis check succeeds', async () => {
+    app = await buildServer({
+      logger: silent,
+      redis: { ping: () => Promise.resolve('PONG') } as never,
+    });
+    const res = await app.inject({ method: 'GET', url: '/ready' });
+    expect(res.json()).toEqual({ status: 'ready' });
+  });
+});
+
+describe('GET /metrics', () => {
+  it('is not registered at all when no METRICS_TOKEN is configured', async () => {
+    app = await buildServer({ logger: silent, metrics: createNoopMetrics() });
+    const res = await app.inject({ method: 'GET', url: '/metrics' });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('rejects a request without the configured bearer token', async () => {
+    app = await buildServer({
+      logger: silent,
+      metrics: createMetrics(),
+      metricsToken: 'a'.repeat(20),
+    });
+    const res = await app.inject({ method: 'GET', url: '/metrics' });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('rejects the wrong bearer token', async () => {
+    app = await buildServer({
+      logger: silent,
+      metrics: createMetrics(),
+      metricsToken: 'a'.repeat(20),
+    });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/metrics',
+      headers: { authorization: 'Bearer wrong' },
+    });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('serves Prometheus text format for the correct bearer token', async () => {
+    const metrics = createMetrics();
+    app = await buildServer({ logger: silent, metrics, metricsToken: 'a'.repeat(20) });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/metrics',
+      headers: { authorization: `Bearer ${'a'.repeat(20)}` },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('coderexic_http_request_duration_seconds');
+  });
+
+  it('records an HTTP request duration observation labeled by route template', async () => {
+    const metrics = createMetrics();
+    app = await buildServer({ logger: silent, metrics, metricsToken: 'a'.repeat(20) });
+    await app.inject({ method: 'GET', url: '/health' });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/metrics',
+      headers: { authorization: `Bearer ${'a'.repeat(20)}` },
+    });
+    expect(res.body).toContain('route="/health"');
+  });
+
+  it('labels an unmatched route "unmatched", never the raw URL', async () => {
+    const metrics = createMetrics();
+    app = await buildServer({ logger: silent, metrics, metricsToken: 'a'.repeat(20) });
+    await app.inject({ method: 'GET', url: '/some/random/path/12345' });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/metrics',
+      headers: { authorization: `Bearer ${'a'.repeat(20)}` },
+    });
+    expect(res.body).toContain('route="unmatched"');
+    expect(res.body).not.toContain('/some/random/path/12345');
   });
 });
 
