@@ -11,7 +11,9 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "node dist/index.js",
-    "graph:index": "tsx --conditions=source --env-file-if-exists=../../.env src/scripts/graph-index.ts"
+    "graph:index": "tsx --conditions=source --env-file-if-exists=../../.env src/scripts/graph-index.ts",
+    "eval:scripted": "tsx --conditions=source src/scripts/eval-run.ts --mode scripted",
+    "eval:live": "tsx --conditions=source --env-file-if-exists=../../.env src/scripts/eval-run.ts --mode live"
   },
   "dependencies": {
     "@coderexic/core": "workspace:*",

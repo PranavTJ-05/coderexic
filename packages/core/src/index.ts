@@ -11,3 +11,4 @@ export * from './context/index.js';
 export * from './agent/index.js';
 export * from './crypto/index.js';
 export * from './metrics/index.js';
+export * from './evaluation/index.js';

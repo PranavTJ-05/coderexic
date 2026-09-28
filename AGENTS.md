@@ -449,6 +449,8 @@ pnpm lint | pnpm typecheck | pnpm test | pnpm build
 pnpm test:integration                 # needs Postgres and Redis
 pnpm db:generate | pnpm db:migrate
 pnpm format
+pnpm eval                             # Phase 15 eval harness, scripted oracle - no API key, no spend
+pnpm eval:live --provider <name> --i-understand-this-spends-real-money  # real model, real spend
 docker compose up -d postgres redis   # infra for local dev
 docker compose up --build             # full stack
 ```
