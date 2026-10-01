@@ -5,11 +5,13 @@ import {
   createReviewJob,
   findActiveReviewJob,
   findInstallationByGithubId,
+  findRecentManualReviewJob,
   findRepository,
   hasReviewCommand,
   installationEventSchema,
   installationRepositoriesEventSchema,
   issueCommentEventSchema,
+  MANUAL_REVIEW_COOLDOWN_MS,
   manualReviewKey,
   markInstallationRemoved,
   markRepositoriesRemoved,
@@ -272,6 +274,19 @@ async function onIssueComment(ctx: WebhookContext, payload: unknown): Promise<We
     new Date(Date.now() - ACTIVE_JOB_WINDOW_MS),
   );
   if (inFlight) return ignored('a review is already queued or running for this pull request');
+
+  // Closes a cost-abuse vector findActiveReviewJob alone doesn't: ten
+  // sequential `/review review` comments, each completing before the next
+  // starts, would otherwise run ten full paid model reviews back to back.
+  const recentManual = await findRecentManualReviewJob(
+    ctx.db,
+    repository.id,
+    event.issue.number,
+    new Date(Date.now() - MANUAL_REVIEW_COOLDOWN_MS),
+  );
+  if (recentManual) {
+    return ignored('a manual review already ran for this pull request recently (cooldown)');
+  }
 
   // headSha is a placeholder (ZERO_SHA): this handler never calls the
   // GitHub API, so the real head sha isn't known yet. The worker resolves

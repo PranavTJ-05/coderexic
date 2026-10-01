@@ -472,6 +472,35 @@ describe('POST /webhooks/github', () => {
       expect(await db.select().from(reviewJobs)).toEqual([]);
     });
 
+    // Phase 16 security audit: the full `author_association` matrix,
+    // since this command is a cost-abuse vector (anyone who can comment can
+    // trigger a paid model call) - must be fully covered, not spot-checked.
+    it.each([
+      ['OWNER', true],
+      ['MEMBER', true],
+      ['COLLABORATOR', true],
+      ['CONTRIBUTOR', false],
+      ['FIRST_TIME_CONTRIBUTOR', false],
+      ['FIRST_TIMER', false],
+      ['NONE', false],
+    ] as const)('author_association %s is authorized=%s', async (association, authorized) => {
+      const res = await deliver('issue_comment', issueComment({ authorAssociation: association }));
+      expect(res.json()).toEqual({ status: authorized ? 'processed' : 'ignored' });
+      expect(await db.select().from(reviewJobs)).toHaveLength(authorized ? 1 : 0);
+    });
+
+    it.each(['OWNER', 'MEMBER', 'COLLABORATOR'])(
+      'a bot account is never authorized even with association %s',
+      async (association) => {
+        const res = await deliver(
+          'issue_comment',
+          issueComment({ authorAssociation: association, userType: 'Bot' }),
+        );
+        expect(res.json()).toEqual({ status: 'ignored' });
+        expect(await db.select().from(reviewJobs)).toEqual([]);
+      },
+    );
+
     it('a missing author_association is treated as unauthorized', async () => {
       const res = await deliver('issue_comment', issueComment({}));
       expect(res.json()).toEqual({ status: 'ignored' });
@@ -516,6 +545,42 @@ describe('POST /webhooks/github', () => {
       const redelivered = await deliver('issue_comment', payload, { delivery: deliveryId });
       expect(redelivered.json()).toEqual({ status: 'duplicate' });
       expect(await db.select().from(reviewJobs)).toHaveLength(1);
+    });
+
+    // Phase 16: findActiveReviewJob only dedupes concurrent jobs, so a
+    // command that completed (not just one still PENDING/RUNNING) must
+    // still block a second command shortly after - otherwise a commenter
+    // can run unlimited paid reviews sequentially.
+    it('a manual review cooldown blocks a second command shortly after a completed one', async () => {
+      const first = await deliver('issue_comment', issueComment({ authorAssociation: 'OWNER' }));
+      expect(first.json()).toEqual({ status: 'processed' });
+      const [job] = await db.select().from(reviewJobs);
+      await db
+        .update(reviewJobs)
+        .set({ status: 'SUCCEEDED', completedAt: new Date() })
+        .where(eq(reviewJobs.id, job!.id));
+
+      const second = await deliver('issue_comment', issueComment({ authorAssociation: 'MEMBER' }));
+      expect(second.json()).toEqual({ status: 'ignored' });
+      expect(await db.select().from(reviewJobs)).toHaveLength(1);
+    });
+
+    it('the manual review cooldown expires after its window passes', async () => {
+      const first = await deliver('issue_comment', issueComment({ authorAssociation: 'OWNER' }));
+      expect(first.json()).toEqual({ status: 'processed' });
+      const [job] = await db.select().from(reviewJobs);
+      await db
+        .update(reviewJobs)
+        .set({
+          status: 'SUCCEEDED',
+          completedAt: new Date(),
+          createdAt: new Date(Date.now() - 11 * 60 * 1000),
+        })
+        .where(eq(reviewJobs.id, job!.id));
+
+      const second = await deliver('issue_comment', issueComment({ authorAssociation: 'MEMBER' }));
+      expect(second.json()).toEqual({ status: 'processed' });
+      expect(await db.select().from(reviewJobs)).toHaveLength(2);
     });
   });
 });
