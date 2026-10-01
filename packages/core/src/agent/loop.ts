@@ -13,6 +13,16 @@ import type {
 
 const DEFAULT_MAX_TURNS = 10;
 const DEFAULT_MAX_FILE_FETCHES = 12;
+/**
+ * `maxTurns` bounds the number of turns, not the number of tool calls a
+ * single turn's response can request (ROADMAP.md Phase 16 tool-abuse
+ * audit) - a compromised or misbehaving model could otherwise return
+ * hundreds of tool calls in one `chat()` response and have every one of
+ * them executed (each with its own `toolTimeoutMs`), turning one turn into
+ * an unbounded amount of work. Calls past this cap are rejected without
+ * reaching the executor, the same shape as the `MAX_FILE_FETCHES` cutoff.
+ */
+const DEFAULT_MAX_TOOL_CALLS_PER_TURN = 20;
 
 export interface ToolCallEvent {
   turnNumber: number;
@@ -29,6 +39,8 @@ export interface AgentLoopOptions {
   tools?: readonly ToolDefinition[];
   maxTurns?: number;
   maxFileFetches?: number;
+  /** Caps how many tool calls one turn's response may make (ROADMAP.md Phase 16). */
+  maxToolCallsPerTurn?: number;
   /** Wall-clock budget from now (AI_AGENT_SPEC.md §9's `MAX_REVIEW_SECONDS`). */
   deadlineMs?: number;
   /** External cancellation, combined with the deadline above. */
@@ -49,6 +61,9 @@ export interface AgentLoopResult {
 
 const FETCH_LIMIT_MESSAGE = (max: number): string =>
   `File fetch limit reached (${max} files). Stop investigating and call submit_review now with your best findings so far.`;
+
+const TOO_MANY_CALLS_MESSAGE = (max: number): string =>
+  `Too many tool calls in one turn (limit ${max} per turn). This call was rejected; call submit_review with your best findings so far.`;
 
 const FINAL_TURN_MESSAGE =
   'This is your final turn before the turn limit. You must call submit_review now with your best findings so far.';
@@ -93,6 +108,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     tools = TOOL_DEFINITIONS,
     maxTurns = DEFAULT_MAX_TURNS,
     maxFileFetches = DEFAULT_MAX_FILE_FETCHES,
+    maxToolCallsPerTurn = DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   } = options;
 
   const deadlineSignal =
@@ -167,15 +183,18 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<AgentLoop
     }
 
     let submitted: ModelReviewOutput | undefined;
-    for (const toolCall of response.toolCalls) {
+    for (const [callIndex, toolCall] of response.toolCalls.entries()) {
       const atFetchLimit =
         toolCall.name === 'get_file_content' && executor.deliveredFileCount >= maxFileFetches;
       if (atFetchLimit) fetchLimitHit = true;
+      const overCallLimit = callIndex >= maxToolCallsPerTurn;
 
       const started = Date.now();
-      const result: ToolExecutionResult = atFetchLimit
-        ? { text: FETCH_LIMIT_MESSAGE(maxFileFetches), status: 'REJECTED' }
-        : await executor.execute(toolCall.name, toolCall.args);
+      const result: ToolExecutionResult = overCallLimit
+        ? { text: TOO_MANY_CALLS_MESSAGE(maxToolCallsPerTurn), status: 'REJECTED' }
+        : atFetchLimit
+          ? { text: FETCH_LIMIT_MESSAGE(maxFileFetches), status: 'REJECTED' }
+          : await executor.execute(toolCall.name, toolCall.args);
       const durationMs = Date.now() - started;
 
       await options.onToolCall?.({ turnNumber: turn, toolCall, result, durationMs });
