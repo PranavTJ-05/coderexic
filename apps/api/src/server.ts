@@ -11,7 +11,7 @@ import type { Queue } from 'bullmq';
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
 import type { Redis } from 'ioredis';
 import { registerHealthRoutes } from './routes/health.js';
-import { registerWebhookRoutes } from './webhooks/route.js';
+import { registerWebhookRoutes, type WebhookRouteOptions } from './webhooks/route.js';
 
 export interface BuildServerOptions {
   logger: Logger;
@@ -31,6 +31,9 @@ export interface BuildServerOptions {
    * unauthenticated on the same public listener as the webhook route).
    */
   metricsToken?: string;
+  /** Test-only overrides for the webhook route's rate limiting. */
+  signatureFailureLimiter?: WebhookRouteOptions['signatureFailureLimiter'];
+  webhookRateLimit?: WebhookRouteOptions['webhookRateLimit'];
 }
 
 export async function buildServer({
@@ -43,6 +46,8 @@ export async function buildServer({
   indexQueue,
   metrics = createMetrics(),
   metricsToken,
+  signatureFailureLimiter,
+  webhookRateLimit,
 }: BuildServerOptions): Promise<FastifyInstance> {
   // Widen to Fastify's logger interface so routes see a plain FastifyInstance.
   const loggerInstance: FastifyBaseLogger = logger;
@@ -97,6 +102,8 @@ export async function buildServer({
       reviewQueue,
       indexQueue,
       metrics,
+      ...(signatureFailureLimiter && { signatureFailureLimiter }),
+      ...(webhookRateLimit && { webhookRateLimit }),
     });
   }
 
