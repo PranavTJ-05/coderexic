@@ -81,6 +81,26 @@ function isExcludedByDefault(filename: string, ignoreGlobs: readonly string[]): 
 }
 
 /**
+ * ROADMAP.md Phase 16 resource-exhaustion audit: `node:path`'s
+ * `matchesGlob` has catastrophic (exponential) backtracking when a pattern
+ * mixes `*` with even a single `!` and is matched against a long enough
+ * string - confirmed directly (see the audit register): a pattern with 10
+ * `*`s and one `!` against a ~4KB filename hangs the process for seconds,
+ * with no way for the caller to interrupt a synchronous call. `!` has no
+ * documented meaning for this app's `ignore` patterns (no gitignore-style
+ * negation is implemented - see `filterIgnoredPaths`/`isExcludedByDefault`,
+ * which only ever treat a match as "exclude"), so the safe fix is to never
+ * pass it to the matcher at all, rather than trying to bound the blowup.
+ * `.coderexic.yml`'s `ignore` field is untrusted repo input, and the
+ * filename side comes from a PR's own changed-file paths (which an
+ * external contributor controls on a fork PR), so both sides of this call
+ * are attacker-influenceable.
+ */
+const DANGEROUS_PATTERN_CHAR = '!';
+/** Defense in depth: real repo-relative paths and glob patterns are always short. */
+const MAX_GLOB_INPUT_LENGTH = 4096;
+
+/**
  * Matches PRODUCT_SPEC.md §11's `ignore` patterns. `path.matchesGlob` treats
  * a pattern without `**` as matching only one path segment, so a bare
  * `dist` or `*.min.js` would not reach nested files the way repository
@@ -88,6 +108,10 @@ function isExcludedByDefault(filename: string, ignoreGlobs: readonly string[]): 
  * common .gitignore-style globs.
  */
 export function matchesGlob(filename: string, pattern: string): boolean {
+  if (pattern.includes(DANGEROUS_PATTERN_CHAR)) return false;
+  if (pattern.length > MAX_GLOB_INPUT_LENGTH || filename.length > MAX_GLOB_INPUT_LENGTH) {
+    return false;
+  }
   const expanded = pattern.includes('/') || pattern.startsWith('**') ? pattern : `**/${pattern}`;
   return nodeMatchesGlob(filename, expanded) || nodeMatchesGlob(filename, `${expanded}/**`);
 }

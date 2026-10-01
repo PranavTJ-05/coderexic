@@ -24,6 +24,44 @@ describe('matchesGlob', () => {
   ])('%s against %s -> %s', (pattern, filename, expected) => {
     expect(matchesGlob(filename, pattern)).toBe(expected);
   });
+
+  // Phase 16 resource-exhaustion audit: a confirmed finding, not a
+  // hypothetical one. `node:path`'s built-in `matchesGlob` has catastrophic
+  // backtracking when a pattern mixes `*` with even a single `!` against a
+  // long-enough filename - directly reproduced with `timeout node -e`
+  // outside the test runner (a vitest timeout cannot interrupt a
+  // synchronous hang; see docs/security-audit.md for the raw numbers).
+  // `.coderexic.yml`'s `ignore` field is untrusted repo input, and the
+  // filename side comes from a PR's own changed files (attacker-controlled
+  // on a fork PR), so both sides of this call can be adversarial.
+  it('resolves a pathological glob/filename pair quickly instead of hanging (confirmed ReDoS, now fixed)', () => {
+    const pathological = '*'.repeat(10) + '!';
+    const longFilename = 'a'.repeat(4000) + '.ts';
+    const start = performance.now();
+    const result = matchesGlob(longFilename, pathological);
+    const elapsedMs = performance.now() - start;
+    expect(elapsedMs).toBeLessThan(500);
+    expect(result).toBe(false);
+  });
+
+  it('resolves a deeply nested ** pattern against a long path quickly', () => {
+    const pattern = Array.from({ length: 30 }, () => '**').join('/') + '/target.ts';
+    const longPath = Array.from({ length: 2000 }, (_, i) => `seg${i}`).join('/') + '/other.ts';
+    const start = performance.now();
+    matchesGlob(longPath, pattern);
+    const elapsedMs = performance.now() - start;
+    expect(elapsedMs).toBeLessThan(1000);
+  });
+
+  it('never matches a pattern containing ! (not a supported feature, and the ReDoS trigger)', () => {
+    expect(matchesGlob('src/a.ts', '*!*')).toBe(false);
+    expect(matchesGlob('anything', '!')).toBe(false);
+  });
+
+  it('rejects an oversized pattern or filename without matching', () => {
+    expect(matchesGlob('a'.repeat(5000) + '.ts', '*.ts')).toBe(false);
+    expect(matchesGlob('a.ts', '*'.repeat(5000) + '.ts')).toBe(false);
+  });
 });
 
 describe('selectReviewableFiles', () => {
