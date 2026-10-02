@@ -27,8 +27,11 @@ describe('isValidToolPath', () => {
   it.each([
     ['bare ..', '..'],
     ['parent traversal', '../../etc/passwd'],
-    ['URL-encoded traversal (never decoded, so literal %2e%2e is harmless text,'
-      + ' but must not be treated as a traversal escape either way)', '%2e%2e/%2e%2e/etc/passwd'],
+    [
+      'URL-encoded traversal (never decoded, so literal %2e%2e is harmless text,' +
+        ' but must not be treated as a traversal escape either way)',
+      '%2e%2e/%2e%2e/etc/passwd',
+    ],
     ['absolute unix path', '/etc/passwd'],
     ['absolute windows path', 'C:\\Windows\\system32\\config'],
     ['windows-style backslash traversal', '..\\..\\secrets.env'],

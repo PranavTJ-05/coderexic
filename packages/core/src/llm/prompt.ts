@@ -58,7 +58,7 @@ export function escapeRulesFence(text: string): string {
 export function escapeFence(text: string, marker: string): string {
   const open = new RegExp(`<<<${marker}`, 'g');
   const close = new RegExp(`${marker}>>>`, 'g');
-  return text.replace(open, `<<​<${marker}`).replace(close, `${marker}>​>>`);
+  return text.replace(open, `<<\u200B<${marker}`).replace(close, `${marker}>\u200B>>`);
 }
 
 /**

@@ -40,7 +40,11 @@ describe('POST /webhooks/github (signature and rate-limit layer)', () => {
   ): Promise<Awaited<ReturnType<typeof buildServer>>> {
     app = await buildServer({
       logger: createLogger({ name: 'route-test', level: 'silent' }),
-      database: { db: fakeDatabase(), ping: async () => undefined, close: async () => undefined },
+      database: {
+        db: fakeDatabase(),
+        ping: () => Promise.resolve(undefined),
+        close: () => Promise.resolve(undefined),
+      },
       webhookSecret: SECRET,
       reviewQueue: fakeQueue(),
       indexQueue: fakeQueue(),

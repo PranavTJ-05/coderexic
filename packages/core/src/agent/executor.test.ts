@@ -41,28 +41,33 @@ const TRAVERSAL_VECTORS: readonly [string, string][] = [
 ];
 
 describe('AgentToolExecutor path traversal guard', () => {
-  describe.each([
-    ['get_file_content', true],
-    ['get_imports', false],
-    ['get_dependents', false],
-  ] as const)('%s', (toolName, fetchesContent) => {
-    it.each(TRAVERSAL_VECTORS)('rejects %s (%p) without calling the GitHub client', async (_label, path) => {
-      const client = fakeGitHubClient();
-      const executor = buildExecutor(client);
-      const result = await executor.execute(toolName, { path });
-      expect(result.status).toBe('REJECTED');
-      expect(result.text).toContain('Invalid path');
-      expect(client.getFileContent).not.toHaveBeenCalled();
-      void fetchesContent;
-    });
-  });
+  describe.each(['get_file_content', 'get_imports', 'get_dependents'] as const)(
+    '%s',
+    (toolName) => {
+      it.each(TRAVERSAL_VECTORS)(
+        'rejects %s (%p) without calling the GitHub client',
+        async (_label, path) => {
+          const client = fakeGitHubClient();
+          // eslint-disable-next-line @typescript-eslint/unbound-method -- mock reference for assertion, never invoked unbound.
+          const getFileContent = vi.mocked(client.getFileContent);
+          const executor = buildExecutor(client);
+          const result = await executor.execute(toolName, { path });
+          expect(result.status).toBe('REJECTED');
+          expect(result.text).toContain('Invalid path');
+          expect(getFileContent).not.toHaveBeenCalled();
+        },
+      );
+    },
+  );
 
   it('accepts an ordinary repo-relative path for get_file_content', async () => {
     const client = fakeGitHubClient();
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- mock reference for assertion, never invoked unbound.
+    const getFileContent = vi.mocked(client.getFileContent);
     const executor = buildExecutor(client);
     const result = await executor.execute('get_file_content', { path: 'src/a.ts' });
     expect(result.status).toBe('SUCCEEDED');
-    expect(client.getFileContent).toHaveBeenCalled();
+    expect(getFileContent).toHaveBeenCalled();
   });
 
   it('rejects malformed arguments (missing path) cleanly for every path tool', async () => {
