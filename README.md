@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/media/icon.png" alt="Coderexic" width="180">
+  <img src="docs/media/logo.png" alt="Coderexic" width="180">
 </p>
 
 <h1 align="center">Coderexic</h1>
