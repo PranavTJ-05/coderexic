@@ -276,3 +276,5 @@ packages/core   Shared code: env, logging, metrics, db, github, queue,
   local webhook forwarding
 - [docs/dependencies.md](docs/dependencies.md): why each dependency was
   added, and what it would take to remove it
+
+<p align="center">Built with ❤️ by <a href="https://github.com/PranavTJ-05">PranavTJ-05</a></p>
