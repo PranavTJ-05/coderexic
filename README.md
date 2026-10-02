@@ -1,6 +1,8 @@
 <p align="center">
-  <img src="docs/media/logo.svg" alt="Coderexic" width="360">
+  <img src="docs/media/icon.png" alt="Coderexic" width="180">
 </p>
+
+<h1 align="center">Coderexic</h1>
 
 <p align="center">
   <strong>Context-aware, agentic pull request review for GitHub.</strong>
