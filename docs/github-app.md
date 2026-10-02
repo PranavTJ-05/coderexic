@@ -27,6 +27,11 @@ Open <https://github.com/settings/apps/new> and fill in:
 **Subscribe to events:** Pull request, Push, Issue comment. GitHub sends
 `installation` and `installation_repositories` automatically.
 
+**App icon:** on the App's page, under **Display information**, click
+**Upload a logo** and select `docs/media/icon.png` (the Coderexic mark). This
+is the avatar GitHub shows next to every review comment the App posts on a
+PR.
+
 ## 2. Credentials
 1. Note the **App ID** on the App's page.
 2. Under **Private keys**, generate a key. Save it outside the repository:
