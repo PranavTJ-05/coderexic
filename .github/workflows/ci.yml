@@ -62,6 +62,14 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker build --target api -t coderexic-api .
       - run: docker build --target worker -t coderexic-worker .
+      - run: docker build --target web -t coderexic-web .
+      # The images Render actually deploys from (render.yaml) - separate
+      # files because Render's Blueprint can't select a build target, see
+      # the root Dockerfile's own comment. Verified independently since
+      # nothing else builds these on a normal PR.
+      - run: docker build -f docker/api.Dockerfile -t coderexic-api-render .
+      - run: docker build -f docker/worker.Dockerfile -t coderexic-worker-render .
+      - run: docker build -f docker/web.Dockerfile -t coderexic-web-render .
 
   secrets:
     runs-on: ubuntu-latest
