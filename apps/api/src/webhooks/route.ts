@@ -6,6 +6,7 @@ import {
   markWebhookEvent,
   recordWebhookEvent,
   verifyWebhookSignature,
+  withDbRetry,
   type Database,
   type IndexQueueJob,
   type Metrics,
@@ -58,9 +59,18 @@ function header(value: string | string[] | undefined): string | undefined {
 
 /**
  * POST /webhooks/github: verify the signature over the raw bytes, record the
- * delivery once, apply it in a transaction and answer quickly. Deliveries
- * already processed (GitHub retries and redeliveries) are acknowledged
- * without being applied again; failed ones are retried.
+ * delivery once, apply it in a transaction and answer quickly. A delivery
+ * already processed (a manual redelivery from the App's dashboard) is
+ * acknowledged without being applied again.
+ *
+ * GitHub does NOT automatically redeliver a failed delivery (confirmed
+ * against GitHub's webhook docs - see WEBHOOK_RATE_LIMIT's comment below),
+ * so a transient DB failure here is not a "try again later" - it's a lost
+ * trigger unless someone notices and clicks Redeliver by hand. Both DB calls
+ * below (`recordWebhookEvent`, the transaction) are wrapped in `withDbRetry`
+ * for exactly that reason (ROADMAP.md Phase 17's "DB retry"); a non-
+ * transient failure (bad payload, a real bug) still fails the delivery
+ * immediately, same as before.
  */
 export async function registerWebhookRoutes(
   app: FastifyInstance,
@@ -151,11 +161,13 @@ export async function registerWebhookRoutes(
             : null;
         const log = request.log.child({ deliveryId, event: eventName, action });
 
-        const { event, created } = await recordWebhookEvent(db, {
-          githubEventId: deliveryId,
-          eventName,
-          action,
-        });
+        const { event, created } = await withDbRetry(() =>
+          recordWebhookEvent(db, {
+            githubEventId: deliveryId,
+            eventName,
+            action,
+          }),
+        );
         if (
           !created &&
           (event.deliveryStatus === 'PROCESSED' || event.deliveryStatus === 'IGNORED')
@@ -166,17 +178,21 @@ export async function registerWebhookRoutes(
         }
 
         try {
-          const outcome = await db.transaction(async (tx) => {
-            const result = await handleWebhookEvent(
-              { db: tx, log, deliveryId },
-              eventName,
-              payload,
-            );
-            await markWebhookEvent(tx, event.id, result.status, {
-              ...(result.installationId !== undefined && { installationId: result.installationId }),
-            });
-            return result;
-          });
+          const outcome = await withDbRetry(() =>
+            db.transaction(async (tx) => {
+              const result = await handleWebhookEvent(
+                { db: tx, log, deliveryId },
+                eventName,
+                payload,
+              );
+              await markWebhookEvent(tx, event.id, result.status, {
+                ...(result.installationId !== undefined && {
+                  installationId: result.installationId,
+                }),
+              });
+              return result;
+            }),
+          );
           if (outcome.status === 'IGNORED')
             log.debug({ reason: outcome.reason }, 'delivery ignored');
           if (outcome.reviewJobId) {

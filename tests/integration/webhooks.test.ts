@@ -11,7 +11,7 @@ import {
   webhookEvents,
 } from '@coderexic/core';
 import { eq } from 'drizzle-orm';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { buildServer } from '../../apps/api/src/server.js';
 import { useTestDatabase } from './helpers/db.js';
 import { useTestRedis } from './helpers/redis.js';
@@ -159,6 +159,54 @@ describe('POST /webhooks/github', () => {
   it('accepts payloads larger than the default 1 MB body limit', async () => {
     const res = await deliver('ping', { zen: 'x'.repeat(2 * 1024 * 1024) });
     expect(res.statusCode).toBe(200);
+  });
+
+  describe('transient DB failure recovery (ROADMAP.md Phase 17)', () => {
+    it('retries once on a transient DB failure during the transaction and still succeeds', async () => {
+      // GitHub does not automatically redeliver a failed delivery (see
+      // route.ts's own doc comment), so this proves withDbRetry actually
+      // saves the delivery instead of only existing in a unit test.
+      const realTransaction = db.transaction.bind(db);
+      let calls = 0;
+      const spy = vi
+        .spyOn(db, 'transaction')
+        .mockImplementation((...args: Parameters<typeof db.transaction>) => {
+          calls += 1;
+          if (calls === 1) {
+            return Promise.reject(Object.assign(new Error('connection reset'), { code: '08006' }));
+          }
+          return realTransaction(...args);
+        });
+
+      try {
+        const res = await deliver('installation', installationCreated());
+
+        expect(calls).toBe(2);
+        expect(res.statusCode).toBe(200);
+        expect(res.json()).toEqual({ status: 'processed' });
+        const [installation] = await db.select().from(installations);
+        expect(installation).toMatchObject({ githubInstallationId: INSTALLATION_ID });
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('does not retry, and fails the delivery, on a non-transient DB error', async () => {
+      let calls = 0;
+      const spy = vi.spyOn(db, 'transaction').mockImplementation(() => {
+        calls += 1;
+        return Promise.reject(Object.assign(new Error('unique violation'), { code: '23505' }));
+      });
+
+      try {
+        const res = await deliver('installation', installationCreated());
+
+        expect(calls).toBe(1);
+        expect(res.statusCode).toBe(500);
+      } finally {
+        spy.mockRestore();
+      }
+    });
   });
 
   describe('installation events', () => {

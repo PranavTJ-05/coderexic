@@ -23,6 +23,7 @@ import {
   findRepositoryById,
   getRepositorySettings,
   hasReviewMarker,
+  isTransientDbError,
   listIgnorePatterns,
   loadRepositoryConfig,
   loadRepositoryRules,
@@ -180,44 +181,22 @@ async function resolveReviewProvider(
 }
 
 /**
- * Postgres SQLSTATE classes worth a retry rather than an immediate terminal
- * failure: connection_exception (08xxx), serialization_failure (40001),
- * deadlock_detected (40P01), too_many_connections (53300), and the
- * admin/crash-shutdown/cannot-connect-now family (57P0x). Everything else
- * (a constraint violation, a syntax error, bad input) is a bug or bad data,
- * not a blip, and retrying it would fail identically.
- */
-const TRANSIENT_PG_SQLSTATES = new Set([
-  '08000',
-  '08001',
-  '08003',
-  '08004',
-  '08006',
-  '40001',
-  '40P01',
-  '53300',
-  '57P01',
-  '57P02',
-  '57P03',
-]);
-
-/**
  * Whether `err` is worth a BullMQ retry rather than an immediate terminal
  * FAILED: a GitHub 5xx or timeout (github/client.ts's `GitHubTimeoutError`
  * arrives here as a generic RequestError with a synthetic 500 - Octokit's
  * own fetch wrapper does that re-wrapping, see client.ts's comment) or a
- * transient Postgres failure. Duck-typed rather than `instanceof
+ * transient Postgres failure (`isTransientDbError`, shared with the webhook
+ * route's own retry - db/retry.ts). Duck-typed rather than `instanceof
  * RequestError`: apps/worker doesn't depend on `octokit` directly, only
  * through `@coderexic/core`, and this codebase already duck-types Octokit
  * errors elsewhere (github/client.test.ts's `.rejects.toMatchObject({
  * status })`).
  */
 function isTransientError(err: unknown): boolean {
+  if (isTransientDbError(err)) return true;
   if (err === null || typeof err !== 'object') return false;
   const status = (err as { status?: unknown }).status;
-  if (typeof status === 'number' && status >= 500) return true;
-  const code = (err as { code?: unknown }).code;
-  return typeof code === 'string' && TRANSIENT_PG_SQLSTATES.has(code);
+  return typeof status === 'number' && status >= 500;
 }
 
 /** Non-error termination reasons stored as review_jobs.error_code. */
