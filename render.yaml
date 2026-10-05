@@ -14,6 +14,11 @@ databases:
     plan: 0.1c-256mb
     databaseName: coderexic
     user: coderexic
+    # Optional for Postgres (Render defaults to allow-all when omitted,
+    # unlike Key Value where it's required) - set explicitly anyway for the
+    # same reason as coderexic-redis below: only ever reached internally via
+    # `fromDatabase`, never from outside Render's network.
+    ipAllowList: []
 
 services:
   # BullMQ's queue state must never be evicted under memory pressure - a
@@ -23,6 +28,13 @@ services:
     type: keyvalue
     plan: 256mb
     maxmemoryPolicy: noeviction
+    # Required by Render's Blueprint schema for a Key Value instance
+    # (unlike Postgres, where it's optional and defaults to allow-all). An
+    # empty list blocks every public-internet connection - correct here,
+    # since coderexic-api/coderexic-worker only ever reach this over
+    # Render's internal network via the `fromService` connection string
+    # below, never from outside it.
+    ipAllowList: []
 
   - name: coderexic-api
     type: web
