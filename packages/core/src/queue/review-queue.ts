@@ -43,19 +43,37 @@ export interface ReviewQueueWorkerOptions {
 }
 
 /**
+ * `job.attemptsMade` only counts attempts BullMQ has already finished
+ * (0 during the very first run); it has not yet counted the attempt
+ * currently in progress. `maxAttempts` is whatever `attempts` enqueueReviewJob
+ * set (defaulting to 1 if the queue somehow omitted it, which is the safe
+ * reading: "no further attempts configured," never "assume there are more").
+ */
+export interface ReviewJobAttempt {
+  attemptsMade: number;
+  maxAttempts: number;
+}
+
+/**
  * Consumes REVIEW_QUEUE_NAME, validating each job's data before it reaches
  * `handler`. BullMQ's own `attempts`/`backoff` (set when the job was
- * enqueued) apply automatically when `handler` throws.
+ * enqueued) apply automatically when `handler` throws. `handler` also gets
+ * this attempt's position in that sequence, so it can tell a retryable
+ * failure (give the review_jobs row back to PENDING, rethrow) from the last
+ * chance (mark it terminal).
  */
 export function createReviewQueueWorker(
   connection: ConnectionOptions,
-  handler: (job: ReviewQueueJob) => Promise<void>,
+  handler: (job: ReviewQueueJob, attempt: ReviewJobAttempt) => Promise<void>,
   options: ReviewQueueWorkerOptions = {},
 ): Worker<ReviewQueueJob> {
   return new Worker<ReviewQueueJob>(
     REVIEW_QUEUE_NAME,
     async (job) => {
-      await handler(reviewQueueJobSchema.parse(job.data));
+      await handler(reviewQueueJobSchema.parse(job.data), {
+        attemptsMade: job.attemptsMade,
+        maxAttempts: job.opts.attempts ?? 1,
+      });
     },
     { connection, concurrency: options.concurrency ?? 2 },
   );

@@ -157,10 +157,16 @@ export function createGitHubApp({
     // gives every thrown fetch error a synthetic 500 before the retry hook
     // ever sees it) three times with quadratic backoff (1s, 4s, 9s - ~14s on
     // top of the timeout itself, confirmed directly while testing the
-    // timeout below). That's a second, much blunter retry policy stacked
-    // underneath the deliberate one above (`shouldRetryRateLimit`) and
-    // review-jobs' own BullMQ-level retry (`review-queue.ts`), so it only
-    // adds unpredictable latency without a corresponding benefit: disabled.
+    // timeout below). review-jobs' own BullMQ-level retry (review-queue.ts,
+    // apps/worker/src/review/pipeline.ts's isTransientError/isLastAttempt
+    // split) already retries the *whole job attempt* on exactly this class
+    // of failure, and does so safely - it re-checks `listReviewBodies` for
+    // an already-posted review before posting again. A blind retry at THIS
+    // layer is not safe the same way: a `createReview`/`createIssueComment`
+    // call that times out may have already been written on GitHub's side,
+    // so retrying the bare HTTP call risks posting a duplicate review.
+    // Disabled in favor of the job-level retry, which checks before it
+    // writes.
     retry: { enabled: false },
     log: {
       debug: () => undefined,

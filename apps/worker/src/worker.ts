@@ -1,10 +1,13 @@
 import {
+  ACTIVE_JOB_WINDOW_MS,
   createIndexQueue,
   createNoopMetrics,
   createReviewQueue,
   createReviewQueueWorker,
   enqueueReviewJob,
   findStalePendingReviewJobs,
+  findStaleRunningReviewJobs,
+  releaseReviewJob,
   type AgentAdapter,
   type Database,
   type GitHubApp,
@@ -47,6 +50,15 @@ export interface ReviewWorkerDeps {
   sweepIntervalMs?: number;
   /** A PENDING job older than this is considered stuck and re-enqueued. */
   staleAfterMs?: number;
+  /**
+   * A RUNNING job whose `startedAt` is older than this is considered
+   * orphaned (its worker crashed outright) and, once confirmed against
+   * BullMQ's own job state, reset to PENDING and re-enqueued. Defaults to
+   * `ACTIVE_JOB_WINDOW_MS` (30 min) - well past any realistic review
+   * duration, since a row that's genuinely still being worked on is also
+   * RUNNING.
+   */
+  stuckRunningAfterMs?: number;
 }
 
 export interface Worker {
@@ -60,10 +72,13 @@ const DEFAULT_STALE_AFTER_MS = 5 * 60_000;
 
 /**
  * Consumes review jobs from Redis and runs them through the review
- * pipeline. Also sweeps for PENDING review_jobs rows with no matching queue
- * entry (an enqueue that failed after its webhook transaction committed)
- * and re-enqueues them; enqueueReviewJob's jobId makes this a no-op for
- * jobs that are already queued or already finished.
+ * pipeline. Also runs two recovery sweeps: PENDING review_jobs rows with no
+ * matching queue entry (an enqueue that failed after its webhook transaction
+ * committed), re-enqueued directly; and RUNNING rows whose worker crashed
+ * outright before reaching a terminal status, confirmed against BullMQ's own
+ * job state before being reset to PENDING and re-enqueued.
+ * `enqueueReviewJob`'s jobId makes a plain re-enqueue a no-op for a job
+ * that's already queued or already finished.
  */
 export function createReviewWorker(deps: ReviewWorkerDeps): Worker {
   let running = false;
@@ -71,6 +86,44 @@ export function createReviewWorker(deps: ReviewWorkerDeps): Worker {
   let indexQueue: Queue<IndexQueueJob> | undefined;
   let consumer: BullWorker<ReviewQueueJob> | undefined;
   let sweepInterval: NodeJS.Timeout | undefined;
+
+  const sweepStuckRunning = async (): Promise<void> => {
+    if (!queue) return;
+    const olderThan = new Date(Date.now() - (deps.stuckRunningAfterMs ?? ACTIVE_JOB_WINDOW_MS));
+    const stuck = await findStaleRunningReviewJobs(deps.db, olderThan);
+    let recovered = 0;
+    for (const job of stuck) {
+      try {
+        const existing = await queue.getJob(job.id);
+        if (existing) {
+          // A worker may genuinely still hold this job (a long review, not a
+          // crash) - the DB row being RUNNING is then correct, not stale.
+          if (await existing.isActive()) continue;
+          // BullMQ ignores `add()` for a jobId that still exists in any
+          // state (completed and failed included), so a stale leftover must
+          // be removed first. `remove()` itself throws if the job became
+          // active/locked since the check above - caught below, which
+          // correctly skips this job for this cycle rather than risking a
+          // double-processed job.
+          await existing.remove();
+        }
+        await releaseReviewJob(deps.db, job.id);
+        await enqueueReviewJob(queue, job.id);
+        recovered++;
+      } catch (err) {
+        deps.logger.warn(
+          { err, reviewJobId: job.id },
+          'stuck-job sweep could not recover a job this cycle',
+        );
+      }
+    }
+    if (recovered > 0) {
+      deps.logger.warn(
+        { count: recovered },
+        'stuck-job sweep recovered orphaned running review jobs',
+      );
+    }
+  };
 
   const sweep = async (): Promise<void> => {
     const olderThan = new Date(Date.now() - (deps.staleAfterMs ?? DEFAULT_STALE_AFTER_MS));
@@ -94,7 +147,7 @@ export function createReviewWorker(deps: ReviewWorkerDeps): Worker {
       metrics.registerQueue('index-runs', indexQueue);
       consumer = createReviewQueueWorker(
         deps.connection,
-        (job) =>
+        (job, attempt) =>
           processReviewJob(
             {
               db: deps.db,
@@ -110,19 +163,35 @@ export function createReviewWorker(deps: ReviewWorkerDeps): Worker {
               ...(deps.masterKeys !== undefined && { masterKeys: deps.masterKeys }),
             },
             job.reviewJobId,
+            attempt,
           ),
         { ...(deps.concurrency !== undefined && { concurrency: deps.concurrency }) },
       );
       consumer.on('failed', (job: Job<ReviewQueueJob> | undefined, err: Error) => {
-        deps.logger.error({ reviewJobId: job?.data.reviewJobId, err }, 'review job attempt failed');
+        // attemptsMade is already bumped by the time this fires (BullMQ records
+        // the failed attempt before emitting the event), so attemptsMade >=
+        // opts.attempts means nothing is left to retry: the job is dead-lettered
+        // (processReviewJob already marks the review_jobs row terminal for this
+        // case - see its isTransientError/isLastAttempt handling).
+        const exhausted = job !== undefined && job.attemptsMade >= (job.opts.attempts ?? 1);
+        deps.logger.error(
+          { reviewJobId: job?.data.reviewJobId, attemptsMade: job?.attemptsMade, exhausted, err },
+          exhausted
+            ? 'review job dead-lettered: all attempts exhausted'
+            : 'review job attempt failed',
+        );
       });
-      await sweep().catch((err: unknown) => {
-        deps.logger.error({ err }, 'startup sweep failed');
-      });
-      sweepInterval = setInterval(() => {
-        void sweep().catch((err: unknown) => {
-          deps.logger.error({ err }, 'sweep failed');
+      const runSweeps = async (): Promise<void> => {
+        await sweep().catch((err: unknown) => {
+          deps.logger.error({ err }, 'stale-pending sweep failed');
         });
+        await sweepStuckRunning().catch((err: unknown) => {
+          deps.logger.error({ err }, 'stuck-running sweep failed');
+        });
+      };
+      await runSweeps();
+      sweepInterval = setInterval(() => {
+        void runSweeps();
       }, deps.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS);
       deps.logger.info('worker started');
     },

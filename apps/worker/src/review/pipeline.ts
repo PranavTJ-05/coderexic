@@ -32,6 +32,7 @@ import {
   placeFindings,
   ProviderCredentialResolutionError,
   recordAgentToolCall,
+  releaseReviewJob,
   resolveProviderEntry,
   runAgentLoop,
   ReviewContextCache,
@@ -57,10 +58,11 @@ import {
   type RepositorySettings,
   type RepoRef,
   type ResolvedProviderEntry,
+  type ReviewJobAttempt,
   type ReviewModel,
   type SupportedModelProvider,
 } from '@coderexic/core';
-import type { Queue } from 'bullmq';
+import { UnrecoverableError, type Queue } from 'bullmq';
 import { publishReview } from './publish.js';
 
 export interface ReviewPipelineDeps {
@@ -177,6 +179,47 @@ async function resolveReviewProvider(
   return resolve(deps.db, { repositoryId, provider }, deps.masterKeys, deps.providers ?? {}, log);
 }
 
+/**
+ * Postgres SQLSTATE classes worth a retry rather than an immediate terminal
+ * failure: connection_exception (08xxx), serialization_failure (40001),
+ * deadlock_detected (40P01), too_many_connections (53300), and the
+ * admin/crash-shutdown/cannot-connect-now family (57P0x). Everything else
+ * (a constraint violation, a syntax error, bad input) is a bug or bad data,
+ * not a blip, and retrying it would fail identically.
+ */
+const TRANSIENT_PG_SQLSTATES = new Set([
+  '08000',
+  '08001',
+  '08003',
+  '08004',
+  '08006',
+  '40001',
+  '40P01',
+  '53300',
+  '57P01',
+  '57P02',
+  '57P03',
+]);
+
+/**
+ * Whether `err` is worth a BullMQ retry rather than an immediate terminal
+ * FAILED: a GitHub 5xx or timeout (github/client.ts's `GitHubTimeoutError`
+ * arrives here as a generic RequestError with a synthetic 500 - Octokit's
+ * own fetch wrapper does that re-wrapping, see client.ts's comment) or a
+ * transient Postgres failure. Duck-typed rather than `instanceof
+ * RequestError`: apps/worker doesn't depend on `octokit` directly, only
+ * through `@coderexic/core`, and this codebase already duck-types Octokit
+ * errors elsewhere (github/client.test.ts's `.rejects.toMatchObject({
+ * status })`).
+ */
+function isTransientError(err: unknown): boolean {
+  if (err === null || typeof err !== 'object') return false;
+  const status = (err as { status?: unknown }).status;
+  if (typeof status === 'number' && status >= 500) return true;
+  const code = (err as { code?: unknown }).code;
+  return typeof code === 'string' && TRANSIENT_PG_SQLSTATES.has(code);
+}
+
 /** Non-error termination reasons stored as review_jobs.error_code. */
 const SKIP_REASON = {
   repositoryRemoved: 'REPOSITORY_REMOVED',
@@ -201,12 +244,23 @@ const MIN_AGENT_REVIEW_SECONDS = 180;
  * retries, or the stale-job sweep re-enqueuing): claimReviewJob only lets
  * one call past PENDING, and a job that already has a posted review is
  * detected and completed without posting again.
+ *
+ * `attempt` identifies this call's position in BullMQ's retry sequence, so
+ * the outer catch-all below can tell a transient failure worth retrying
+ * (release the row back to PENDING, rethrow so BullMQ's own backoff applies)
+ * from the last chance (mark it terminal). Defaults to "no retries
+ * configured" - every caller that doesn't know about BullMQ attempts (a
+ * direct test call, the stale-job sweep re-running a job inline) gets the
+ * old, always-terminal-on-failure behavior, never an unintended free retry
+ * window.
  */
 export async function processReviewJob(
   deps: ReviewPipelineDeps,
   reviewJobId: string,
+  attempt: ReviewJobAttempt = { attemptsMade: 0, maxAttempts: 1 },
 ): Promise<void> {
   const { db, githubApp, model, provider, modelName, logger } = deps;
+  const isLastAttempt = attempt.attemptsMade + 1 >= attempt.maxAttempts;
   const metrics = deps.metrics ?? createNoopMetrics();
   const budget = deps.diffBudget ?? DEFAULT_DIFF_BUDGET;
   const log = logger.child({ reviewJobId });
@@ -584,19 +638,42 @@ export async function processReviewJob(
       clearTimeout(timeout);
     }
   } catch (err) {
+    const transient = isTransientError(err);
+    const message = err instanceof Error ? err.message : 'unknown error';
+
+    if (transient && !isLastAttempt) {
+      // A GitHub 5xx/timeout or a Postgres connection blip, with attempts
+      // left: give the row back to PENDING so BullMQ's own retry can
+      // actually reclaim it via claimReviewJob (without this, the row stays
+      // RUNNING, the retry's claimReviewJob call finds a non-PENDING row,
+      // and the pipeline treats that as "already handled" - the retry
+      // silently does nothing and BullMQ records the job as completed).
+      log.warn({ err }, 'review job failed on a transient error; releasing for a BullMQ retry');
+      metrics.recordError('TRANSIENT_ERROR');
+      await releaseReviewJob(db, reviewJobId).catch((releaseErr: unknown) => {
+        log.error({ err: releaseErr }, 'failed to release job for retry');
+      });
+      throw err;
+    }
+
     log.error({ err }, 'review job failed unexpectedly');
-    metrics.recordError('UNEXPECTED_ERROR');
+    metrics.recordError(transient ? 'RETRIES_EXHAUSTED' : 'UNEXPECTED_ERROR');
     await failReviewJob(
       db,
       reviewJobId,
       'FAILED',
-      'UNEXPECTED_ERROR',
-      err instanceof Error ? err.message : 'unknown error',
+      transient ? 'RETRIES_EXHAUSTED' : 'UNEXPECTED_ERROR',
+      message,
     ).catch((markErr: unknown) => {
       log.error({ err: markErr }, 'failed to mark job failed');
     });
-    // Rethrow so BullMQ records the attempt as failed and applies its retry policy.
-    throw err;
+    // A permanent error would fail identically on every further BullMQ
+    // attempt, so skip wasting them: UnrecoverableError short-circuits
+    // shouldRetryJob regardless of attempts remaining. A transient error
+    // that simply ran out of attempts has none left anyway - rethrow the
+    // original so BullMQ's own accounting (and the `failed` handler's
+    // dead-letter log) reflects the real cause.
+    throw transient ? err : new UnrecoverableError(message);
   }
 }
 

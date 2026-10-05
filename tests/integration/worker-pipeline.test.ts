@@ -11,6 +11,7 @@ import {
   markRepositoryIndexed,
   ModelHttpError,
   ProviderCredentialResolutionError,
+  releaseReviewJob,
   reviewFindings,
   reviewJobs,
   reviews,
@@ -964,6 +965,140 @@ describe('worker: processReviewJob', () => {
       expect(text).not.toContain(job.id);
     });
   });
+
+  describe('transient-failure retry (ROADMAP.md Phase 17)', () => {
+    /** Shaped like github/client.ts's GitHubTimeoutError once Octokit re-wraps it: a status, no more. */
+    function transientGithubError(message = 'GitHub request timed out after 20000ms') {
+      return Object.assign(new Error(message), { status: 500 });
+    }
+
+    it('releases the job to PENDING (not FAILED) and rethrows when attempts remain', async () => {
+      const { job } = await makeReviewJob(db);
+      const client: FakeClient = {
+        ...fakeClient(),
+        getPullRequest: () => Promise.reject(transientGithubError()),
+      };
+      const deps = {
+        db,
+        githubApp: fakeGithubApp(client),
+        model: fakeModel(FINDING_OUTPUT),
+        provider: 'test',
+        modelName: 'm',
+        logger,
+      };
+
+      await expect(
+        processReviewJob(deps, job.id, { attemptsMade: 0, maxAttempts: 3 }),
+      ).rejects.toThrow('timed out');
+
+      const [stored] = await db.select().from(reviewJobs).where(eq(reviewJobs.id, job.id));
+      expect(stored).toMatchObject({ status: 'PENDING' });
+    });
+
+    it('succeeds on a later attempt after a transient failure released it, posting exactly once', async () => {
+      const { job } = await makeReviewJob(db);
+      let calls = 0;
+      const client: FakeClient = {
+        ...fakeClient(),
+        getPullRequest: () => {
+          calls += 1;
+          return calls === 1
+            ? Promise.reject(transientGithubError())
+            : Promise.resolve(basePullRequest());
+        },
+      };
+      const deps = {
+        db,
+        githubApp: fakeGithubApp(client),
+        model: fakeModel(FINDING_OUTPUT),
+        provider: 'test',
+        modelName: 'm',
+        logger,
+      };
+
+      await expect(
+        processReviewJob(deps, job.id, { attemptsMade: 0, maxAttempts: 3 }),
+      ).rejects.toThrow('timed out');
+      await processReviewJob(deps, job.id, { attemptsMade: 1, maxAttempts: 3 });
+
+      expect(client.createReviewCalls).toHaveLength(1);
+      const [stored] = await db.select().from(reviewJobs).where(eq(reviewJobs.id, job.id));
+      expect(stored).toMatchObject({ status: 'SUCCEEDED' });
+    });
+
+    it('marks the job FAILED with RETRIES_EXHAUSTED on the last attempt instead of releasing it', async () => {
+      const { job } = await makeReviewJob(db);
+      const client: FakeClient = {
+        ...fakeClient(),
+        getPullRequest: () => Promise.reject(transientGithubError()),
+      };
+      const deps = {
+        db,
+        githubApp: fakeGithubApp(client),
+        model: fakeModel(FINDING_OUTPUT),
+        provider: 'test',
+        modelName: 'm',
+        logger,
+      };
+
+      await expect(
+        processReviewJob(deps, job.id, { attemptsMade: 2, maxAttempts: 3 }),
+      ).rejects.toThrow('timed out');
+
+      const [stored] = await db.select().from(reviewJobs).where(eq(reviewJobs.id, job.id));
+      expect(stored).toMatchObject({ status: 'FAILED', errorCode: 'RETRIES_EXHAUSTED' });
+    });
+
+    it('a non-transient error is never released, even with attempts remaining', async () => {
+      const { job } = await makeReviewJob(db);
+      const client: FakeClient = {
+        ...fakeClient(),
+        getPullRequest: () => Promise.reject(new Error('completely unexpected')),
+      };
+      const deps = {
+        db,
+        githubApp: fakeGithubApp(client),
+        model: fakeModel(FINDING_OUTPUT),
+        provider: 'test',
+        modelName: 'm',
+        logger,
+      };
+
+      await expect(
+        processReviewJob(deps, job.id, { attemptsMade: 0, maxAttempts: 3 }),
+      ).rejects.toThrow('completely unexpected');
+
+      const [stored] = await db.select().from(reviewJobs).where(eq(reviewJobs.id, job.id));
+      expect(stored).toMatchObject({ status: 'FAILED', errorCode: 'UNEXPECTED_ERROR' });
+    });
+
+    it('a retry that lands after the review was already posted completes via the marker, never reposting', async () => {
+      const { job } = await makeReviewJob(db);
+      const marker = `<!-- coderexic:review-job:${job.id} -->`;
+      const client = fakeClient({ reviewBodies: [`intro\n${marker}\nbody`] });
+      const deps = {
+        db,
+        githubApp: fakeGithubApp(client),
+        model: fakeModel(FINDING_OUTPUT),
+        provider: 'test',
+        modelName: 'm',
+        logger,
+      };
+
+      // What the transient-retry branch itself does on attempt 1, standing in
+      // for "the post actually succeeded on GitHub's side just before this
+      // process crashed or lost its connection, so it never got the chance
+      // to mark the row SUCCEEDED."
+      await claimReviewJob(db, job.id);
+      await releaseReviewJob(db, job.id);
+
+      await processReviewJob(deps, job.id, { attemptsMade: 1, maxAttempts: 3 });
+
+      expect(client.createReviewCalls).toHaveLength(0);
+      const [stored] = await db.select().from(reviewJobs).where(eq(reviewJobs.id, job.id));
+      expect(stored).toMatchObject({ status: 'SUCCEEDED' });
+    });
+  });
 });
 
 describe('worker: createReviewWorker end to end', () => {
@@ -1046,6 +1181,59 @@ describe('worker: createReviewWorker end to end', () => {
       await producer.close();
       await indexQueue.obliterate({ force: true }).catch(() => undefined);
       await indexQueue.close();
+    }
+  }, 15_000);
+
+  it('recovers a RUNNING row orphaned by a crashed worker, with no surviving BullMQ job', async () => {
+    const { job } = await makeReviewJob(db);
+    // Simulate a worker that claimed the job, then was killed outright
+    // (OOM, SIGKILL) before reaching any terminal status or its own BullMQ
+    // job entry: claimReviewJob is the only thing that touches startedAt,
+    // but nothing re-enqueues it, so there is deliberately no producer.add
+    // call anywhere in this test.
+    await claimReviewJob(db, job.id);
+    await db
+      .update(reviewJobs)
+      .set({ startedAt: new Date(Date.now() - 60_000) })
+      .where(eq(reviewJobs.id, job.id));
+
+    const client = fakeClient();
+    const worker = createReviewWorker({
+      logger,
+      db,
+      connection: redis,
+      githubApp: fakeGithubApp(client),
+      model: fakeModel(FINDING_OUTPUT),
+      provider: 'test-provider',
+      modelName: 'test-model',
+      concurrency: 1,
+      sweepIntervalMs: 200,
+      staleAfterMs: 3_600_000,
+      stuckRunningAfterMs: 30_000,
+    });
+
+    try {
+      await worker.start();
+
+      const deadline = Date.now() + 10_000;
+      let status: string | undefined;
+      while (Date.now() < deadline) {
+        const [row] = await db.select().from(reviewJobs).where(eq(reviewJobs.id, job.id));
+        status = row?.status;
+        if (status && status !== 'PENDING' && status !== 'RUNNING') break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      // The job was only ever reachable via the stuck-running sweep
+      // resetting it to PENDING and calling enqueueReviewJob, so reaching
+      // SUCCEEDED proves a real BullMQ job actually got created and picked
+      // up, not just that the DB row changed.
+      expect(status).toBe('SUCCEEDED');
+      expect(client.createReviewCalls).toHaveLength(1);
+    } finally {
+      await worker.stop();
+      const producer = createReviewQueue(redis);
+      await producer.obliterate({ force: true }).catch(() => undefined);
+      await producer.close();
     }
   }, 15_000);
 });

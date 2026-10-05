@@ -119,6 +119,24 @@ export async function claimReviewJob(
   return row;
 }
 
+/**
+ * Gives a RUNNING job back to PENDING after a transient failure (a GitHub
+ * 5xx/timeout, a Postgres connection blip), so BullMQ's own retry can
+ * actually reclaim it via `claimReviewJob` - without this, the row stays
+ * RUNNING (or a caller marks it FAILED) and a BullMQ retry's `claimReviewJob`
+ * call finds a non-PENDING row, returns undefined, and the pipeline treats
+ * that as "already handled, skip" - so the retry silently does nothing and
+ * BullMQ records the job as completed. Conditioned on the row still being
+ * RUNNING so a release call that lost a race with some other transition
+ * (e.g. the stale-job sweep already reset it) is a no-op, not a regression.
+ */
+export async function releaseReviewJob(db: Executor, reviewJobId: string): Promise<void> {
+  await db
+    .update(reviewJobs)
+    .set({ status: 'PENDING' })
+    .where(and(eq(reviewJobs.id, reviewJobId), eq(reviewJobs.status, 'RUNNING')));
+}
+
 export async function findReviewJobById(db: Executor, id: string): Promise<ReviewJob | undefined> {
   const [row] = await db.select().from(reviewJobs).where(eq(reviewJobs.id, id));
   return row;
@@ -236,6 +254,28 @@ export async function findStalePendingReviewJobs(
     .select()
     .from(reviewJobs)
     .where(and(eq(reviewJobs.status, 'PENDING'), lt(reviewJobs.createdAt, olderThan)))
+    .limit(limit);
+}
+
+/**
+ * RUNNING jobs whose `startedAt` is older than `olderThan`, for the worker's
+ * stuck-job sweep. A row stays RUNNING forever if the worker processing it
+ * crashes outright (OOM, SIGKILL, a hard process exit before the pipeline's
+ * own catch-all runs) - `claimReviewJob` only claims PENDING rows, so
+ * nothing else will ever pick this job back up. `olderThan` should be well
+ * past any realistic review duration (the caller is expected to use
+ * something like `ACTIVE_JOB_WINDOW_MS`), since a row that's genuinely still
+ * being worked on is also RUNNING.
+ */
+export async function findStaleRunningReviewJobs(
+  db: Executor,
+  olderThan: Date,
+  limit = 50,
+): Promise<ReviewJob[]> {
+  return db
+    .select()
+    .from(reviewJobs)
+    .where(and(eq(reviewJobs.status, 'RUNNING'), lt(reviewJobs.startedAt, olderThan)))
     .limit(limit);
 }
 
