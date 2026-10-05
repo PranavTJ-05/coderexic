@@ -9,7 +9,7 @@ describe('getAuthOptions', () => {
   // own `await import(...)` calls (needed after `vi.resetModules()`) fast.
   beforeAll(async () => {
     await import('./auth.js');
-  });
+  }, 30_000);
 
   beforeEach(() => {
     vi.resetModules();

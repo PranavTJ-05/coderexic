@@ -19,9 +19,13 @@ COPY apps/api/package.json apps/api/
 COPY apps/worker/package.json apps/worker/
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
 COPY tsconfig.base.json ./
-COPY packages ./packages
-COPY apps ./apps
-RUN pnpm build
+COPY packages/core ./packages/core
+COPY apps/api ./apps/api
+COPY apps/worker ./apps/worker
+# Filtered, not `pnpm -r build`: this image never installs apps/web's
+# dependencies (its package.json is never copied above), so a recursive
+# build would fail trying to compile a package with no node_modules.
+RUN pnpm --filter @coderexic/core --filter @coderexic/api --filter @coderexic/worker build
 # Self-contained production trees with only runtime dependencies.
 RUN pnpm deploy --filter @coderexic/api --prod --legacy /out/api \
  && pnpm deploy --filter @coderexic/worker --prod --legacy /out/worker
@@ -40,4 +44,7 @@ CMD ["node", "dist/index.js"]
 
 FROM runtime AS worker
 COPY --from=build --chown=node:node /out/worker ./
+EXPOSE 9091
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:9091/health > /dev/null || exit 1
 CMD ["node", "dist/index.js"]

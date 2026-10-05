@@ -6,6 +6,7 @@
  */
 export function isValidToolPath(path: string): boolean {
   if (path.length === 0 || path.length > 1024) return false;
+  if (path.includes('\u0000')) return false;
   if (path.startsWith('/') || path.startsWith('\\')) return false;
   if (/^[a-zA-Z]:[/\\]/.test(path)) return false;
   const segments = path.split(/[/\\]/);

@@ -32,4 +32,31 @@ describe('verifyWebhookSignature', () => {
     const header = signWebhookPayload(secret, body);
     expect(verifyWebhookSignature(secret, Buffer.from('{"action":"closed"}'), header)).toBe(false);
   });
+
+  // Phase 16 security audit: explicit signature edge cases. Node's
+  // `crypto.timingSafeEqual` throws on a length mismatch, so these must be
+  // guarded before it's called - a crash here would surface as a 500
+  // instead of a clean 401.
+  it('accepts uppercase hex (decodes to the same bytes)', () => {
+    const header = signWebhookPayload(secret, body).toUpperCase().replace('SHA256=', 'sha256=');
+    expect(verifyWebhookSignature(secret, body, header)).toBe(true);
+  });
+
+  it('does not throw on a header far longer than a real signature', () => {
+    expect(() =>
+      verifyWebhookSignature(secret, body, 'sha256=' + 'a'.repeat(10_000)),
+    ).not.toThrow();
+    expect(verifyWebhookSignature(secret, body, 'sha256=' + 'a'.repeat(10_000))).toBe(false);
+  });
+
+  it('does not throw on a header that is just the prefix with nothing after it', () => {
+    expect(() => verifyWebhookSignature(secret, body, 'sha256=')).not.toThrow();
+    expect(verifyWebhookSignature(secret, body, 'sha256=')).toBe(false);
+  });
+
+  it('does not throw on a header containing non-hex characters mixed with valid hex', () => {
+    const valid = signWebhookPayload(secret, body);
+    expect(() => verifyWebhookSignature(secret, body, valid + 'zz')).not.toThrow();
+    expect(verifyWebhookSignature(secret, body, valid + 'zz')).toBe(false);
+  });
 });

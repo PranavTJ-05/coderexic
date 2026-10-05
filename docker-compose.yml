@@ -69,6 +69,11 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
 
   worker:
     build:
@@ -98,6 +103,11 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
 
 volumes:
   postgres-data:

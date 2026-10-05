@@ -204,6 +204,64 @@ describe('runAgentLoop', () => {
     expect(result.status).toBe('FAILED');
   });
 
+  // Phase 16 tool-abuse audit: maxTurns bounds turns, not calls per turn.
+  it('rejects tool calls past the per-turn cap without dispatching them, within the same turn', async () => {
+    const manyCalls = Array.from({ length: 5 }, (_, i) => ({
+      id: String(i),
+      name: 'get_imports',
+      args: { path: `f${i}.ts` },
+    }));
+    const { adapter } = fakeAdapter([
+      { text: null, toolCalls: manyCalls },
+      { text: null, toolCalls: [{ id: 'submit', name: 'submit_review', args: SUBMIT_OUTPUT }] },
+    ]);
+    const { executor, execute } = fakeExecutor({
+      results: {
+        submit_review: { text: 'ok', done: true, output: SUBMIT_OUTPUT, status: 'SUCCEEDED' },
+      },
+    });
+    const result = await runAgentLoop({
+      adapter,
+      executor,
+      systemPrompt: 's',
+      initialUserMessage: 'u',
+      maxToolCallsPerTurn: 2,
+    });
+    // Only the first 2 of the 5 calls in that turn actually reached the executor.
+    expect(execute).toHaveBeenCalledTimes(2 + 1); // + the later submit_review call
+    expect(execute).toHaveBeenCalledWith('get_imports', { path: 'f0.ts' });
+    expect(execute).toHaveBeenCalledWith('get_imports', { path: 'f1.ts' });
+    expect(execute).not.toHaveBeenCalledWith('get_imports', { path: 'f2.ts' });
+    expect(execute).not.toHaveBeenCalledWith('get_imports', { path: 'f4.ts' });
+    expect(result.status).toBe('SUCCEEDED');
+  });
+
+  it('does not crash on a huge batch of identical tool calls in one turn', async () => {
+    const manyCalls = Array.from({ length: 500 }, (_, i) => ({
+      id: String(i),
+      name: 'get_imports',
+      args: { path: 'same.ts' },
+    }));
+    const { adapter } = fakeAdapter([
+      { text: null, toolCalls: manyCalls },
+      { text: null, toolCalls: [{ id: 'submit', name: 'submit_review', args: SUBMIT_OUTPUT }] },
+    ]);
+    const { executor, execute } = fakeExecutor({
+      results: {
+        submit_review: { text: 'ok', done: true, output: SUBMIT_OUTPUT, status: 'SUCCEEDED' },
+      },
+    });
+    const result = await runAgentLoop({
+      adapter,
+      executor,
+      systemPrompt: 's',
+      initialUserMessage: 'u',
+      maxToolCallsPerTurn: 3,
+    });
+    expect(execute).toHaveBeenCalledTimes(3 + 1);
+    expect(result.status).toBe('SUCCEEDED');
+  });
+
   it('falls back to parsing plain text as the review when no tool call is made', async () => {
     const { adapter } = fakeAdapter([
       { text: '```json\n' + JSON.stringify(SUBMIT_OUTPUT) + '\n```', toolCalls: null },

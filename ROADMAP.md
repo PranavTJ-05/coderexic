@@ -1165,19 +1165,47 @@ go-ahead first.
 
 ## Phase 16: Security hardening
 **Goal:** ready for real repos.
-- [ ] Webhook security audit
-- [ ] GitHub permission audit
-- [ ] Secret scanning
-- [ ] Path traversal tests
-- [ ] Repo isolation tests
-- [ ] Prompt injection tests
-- [ ] Tool abuse tests
-- [ ] Resource exhaustion tests
-- [ ] Rate-limit tests
-- [ ] Dependency audit
-- [ ] Container hardening
+- [x] Webhook security audit - signature-shape validation tightened
+      (signature.ts), rate limiting at `onRequest` before the 25MB body
+      parse, a separate aggressive throttle for requests that already
+      failed signature verification (`signature-failure-limiter.ts`).
+- [x] GitHub permission audit - every Octokit call cross-checked against
+      the declared permission table; found and fixed one real mismatch
+      (Issues needed read/write for `publishReview`'s fallback comment,
+      docs said read-only - see PRODUCT_SPEC.md §7.1 and
+      docs/github-app.md).
+- [x] Secret scanning - `secrets` CI job (gitleaks/gitleaks-action) on
+      every push/PR; verified locally with the gitleaks CLI first.
+- [x] Path traversal tests - NUL-byte path guard plus a dedicated test
+      suite (`path-validation.test.ts`).
+- [x] Repo isolation tests - `findAuthorizedRepository` /
+      `findAuthorizedReviewJob` (the dashboard's actual IDOR guard) now
+      have the cross-tenant case under test: a real job from a repo the
+      caller isn't authorized for returns `undefined`, not the findings.
+- [x] Prompt injection tests - PR title/body fencing, @mention
+      neutralization (`mention-guard.ts`), tests in `prompt.test.ts` and
+      `mention-guard.test.ts`.
+- [x] Tool abuse tests - per-turn tool-call cap in the agent loop, tests
+      in `executor.test.ts` / `loop.test.ts`.
+- [x] Resource exhaustion tests - confirmed ReDoS in `matchesGlob` fixed
+      (node:path catastrophic backtracking), plus regression tests for a
+      YAML alias-bomb config and a 3000-file PR (GitHub's own listFiles
+      cap) against the default diff budget.
+- [x] Rate-limit tests - `route.test.ts` covers both the generous
+      verified-traffic cap and the signature-failure throttle.
+- [x] Dependency audit - `pnpm audit` found one moderate advisory
+      (GHSA-67mh-4wv8-2f99, esbuild via drizzle-kit's deprecated
+      `@esbuild-kit/esm-loader`); pinned via `pnpm.overrides`, no
+      regressions. `pnpm audit` now reports no known vulnerabilities.
+- [x] Container hardening - Dockerfile builds only the workspaces the
+      image ships (core/api/worker) plus a worker `HEALTHCHECK`;
+      docker-compose runs api/worker with all capabilities dropped, a
+      read-only root filesystem, and a tmpfs `/tmp`. Both targets
+      rebuilt locally end to end to confirm no regression.
 
-**Production blocker:** no unresolved critical security issue.
+**Production blocker:** no unresolved critical security issue. All
+checklist items above are addressed on `phase-16-sec-impl`; the branch
+still needs a PR and merge to `main`.
 
 ## Phase 17: Reliability
 - [ ] Retry policies

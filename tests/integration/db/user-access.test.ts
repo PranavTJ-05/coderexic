@@ -1,11 +1,14 @@
 import {
+  findAuthorizedRepository,
+  findAuthorizedReviewJob,
+  findInstallationById,
   GitHubUserAccessError,
   listAuthorizedRepositories,
   markInstallationRemoved,
   markRepositoriesRemoved,
 } from '@coderexic/core';
 import { describe, expect, it, vi } from 'vitest';
-import { makeInstallation, makeRepository } from './fixtures.js';
+import { makeInstallation, makeRepository, makeReviewJob } from './fixtures.js';
 import { useTestDatabase } from '../helpers/db.js';
 
 const { db } = useTestDatabase();
@@ -168,5 +171,90 @@ describe('listAuthorizedRepositories', () => {
     const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
     expect(url).not.toContain('secret-user-token');
     expect((init.headers as Record<string, string>).authorization).toBe('Bearer secret-user-token');
+  });
+});
+
+describe('findAuthorizedRepository', () => {
+  it('returns undefined for a repository GitHub never listed as authorized', async () => {
+    const repository = await makeRepository(db);
+    const fetchImpl = fakeFetch([], {});
+
+    const result = await findAuthorizedRepository(db, 'user-token', repository.id, fetchImpl);
+
+    expect(result).toBeUndefined();
+  });
+
+  it('finds the one matching repository out of several the user is authorized for', async () => {
+    const installation = await makeInstallation(db);
+    const wanted = await makeRepository(db, installation.id);
+    const other = await makeRepository(db, installation.id);
+    const fetchImpl = fakeFetch([{ id: installation.githubInstallationId }], {
+      [installation.githubInstallationId]: [
+        { id: wanted.githubRepositoryId, full_name: wanted.fullName, permissions: { admin: true } },
+        { id: other.githubRepositoryId, full_name: other.fullName, permissions: { admin: true } },
+      ],
+    });
+
+    const result = await findAuthorizedRepository(db, 'user-token', wanted.id, fetchImpl);
+
+    expect(result?.repositoryId).toBe(wanted.id);
+  });
+});
+
+describe('findAuthorizedReviewJob', () => {
+  it('returns undefined for a well-formed id that does not exist', async () => {
+    const fetchImpl = fakeFetch([], {});
+    const result = await findAuthorizedReviewJob(
+      db,
+      'user-token',
+      '00000000-0000-0000-0000-000000000000',
+      fetchImpl,
+    );
+    expect(result).toBeUndefined();
+  });
+
+  it('returns undefined instead of throwing for a malformed id (never reaches Postgres)', async () => {
+    const fetchImpl = fakeFetch([], {});
+    const result = await findAuthorizedReviewJob(db, 'user-token', 'not-a-uuid', fetchImpl);
+    expect(result).toBeUndefined();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('refuses a real job from a repository the user is not authorized for (cross-tenant IDOR)', async () => {
+    // The scenario the function exists to stop: a user authorized for their
+    // own repo pastes or guesses a *different* repo's job id into the URL.
+    // Authorizing by "the job exists and I'm signed in" would leak that
+    // repo's findings; this must check the job's own repository, not any
+    // repository the caller happens to be authorized for.
+    const { job: otherTenantsJob } = await makeReviewJob(db);
+    const myInstallation = await makeInstallation(db);
+    const myRepo = await makeRepository(db, myInstallation.id);
+    const fetchImpl = fakeFetch([{ id: myInstallation.githubInstallationId }], {
+      [myInstallation.githubInstallationId]: [
+        { id: myRepo.githubRepositoryId, full_name: myRepo.fullName, permissions: { admin: true } },
+      ],
+    });
+
+    const result = await findAuthorizedReviewJob(db, 'user-token', otherTenantsJob.id, fetchImpl);
+
+    expect(result).toBeUndefined();
+  });
+
+  it('returns the job when the user is authorized for its own repository', async () => {
+    const { repository, job } = await makeReviewJob(db);
+    const installation = await findInstallationById(db, repository.installationId);
+    const fetchImpl = fakeFetch([{ id: installation!.githubInstallationId }], {
+      [installation!.githubInstallationId]: [
+        {
+          id: repository.githubRepositoryId,
+          full_name: repository.fullName,
+          permissions: { admin: true },
+        },
+      ],
+    });
+
+    const result = await findAuthorizedReviewJob(db, 'user-token', job.id, fetchImpl);
+
+    expect(result?.id).toBe(job.id);
   });
 });

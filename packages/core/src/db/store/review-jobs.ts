@@ -148,6 +148,47 @@ export const ACTIVE_JOB_WINDOW_MS = 30 * 60 * 1000;
  *    checks for the other (with `headSha` and `excludeId: <its own id>`)
  *    once its own head sha is known, and whichever loses cancels itself.
  */
+/**
+ * Cooldown for manual `/review review` triggers on a single pull request.
+ * `findActiveReviewJob` only dedupes *concurrent* jobs (PENDING/RUNNING
+ * within `ACTIVE_JOB_WINDOW_MS`); it does nothing once a job has finished,
+ * so without this a commenter could type the command ten times in a row,
+ * each completing before the next starts, and trigger ten full paid model
+ * reviews back to back. This closes that - a real, unbounded spend vector -
+ * with a fixed per-PR cooldown rather than a `repository_settings` column,
+ * so it needs no schema migration (ROADMAP.md Phase 16).
+ */
+export const MANUAL_REVIEW_COOLDOWN_MS = 10 * 60 * 1000;
+
+/**
+ * The most recent manual review job for this (repository, PR), regardless
+ * of status, created more recently than `since`. Unlike
+ * `findActiveReviewJob`, this intentionally also matches a job that already
+ * finished (SUCCEEDED/FAILED/etc.), since the cooldown is about spend, not
+ * concurrency.
+ */
+export async function findRecentManualReviewJob(
+  db: Executor,
+  repositoryId: string,
+  pullRequestNumber: number,
+  since: Date,
+): Promise<ReviewJob | undefined> {
+  const [row] = await db
+    .select()
+    .from(reviewJobs)
+    .where(
+      and(
+        eq(reviewJobs.repositoryId, repositoryId),
+        eq(reviewJobs.pullRequestNumber, pullRequestNumber),
+        eq(reviewJobs.triggerType, 'manual'),
+        gt(reviewJobs.createdAt, since),
+      ),
+    )
+    .orderBy(desc(reviewJobs.createdAt))
+    .limit(1);
+  return row;
+}
+
 export async function findActiveReviewJob(
   db: Executor,
   repositoryId: string,

@@ -1,6 +1,7 @@
 import type { NewReviewFinding, ReviewFinding } from '../db/store/review-jobs.js';
 import type { CreateReviewInput, ReviewComment } from '../github/types.js';
 import type { ModelFinding } from '../llm/types.js';
+import { neutralizeMentions } from '../security/mention-guard.js';
 import { matchesGlob } from './diff-filter.js';
 import { firstAddedLine, hunkAt, isAddedLine, parseHunks, type Hunk } from './hunks.js';
 
@@ -86,7 +87,7 @@ const SEVERITY_LABEL: Record<ModelFinding['severity'], string> = {
 };
 
 function commentBody(finding: ModelFinding, downgradedFromApplyable: boolean): string {
-  const parts = [`**${SEVERITY_LABEL[finding.severity]}:** ${finding.issue}`];
+  const parts = [`**${SEVERITY_LABEL[finding.severity]}:** ${neutralizeMentions(finding.issue)}`];
   if (finding.fix_type === 'applyable' && !downgradedFromApplyable && finding.suggested_code) {
     parts.push('```suggestion\n' + finding.suggested_code + '\n```');
   } else if (finding.suggested_code) {
@@ -195,14 +196,14 @@ export function buildSummaryBody(
   summary: string,
   summaryOnly: readonly { finding: ModelFinding; reason: string }[],
 ): string {
-  const parts = [summary || '_No summary provided._'];
+  const parts = [neutralizeMentions(summary) || '_No summary provided._'];
   if (summaryOnly.length > 0) {
     parts.push(
       '<details><summary>Additional findings not shown inline</summary>\n\n' +
         summaryOnly
           .map(
             ({ finding, reason }) =>
-              `- **${SEVERITY_LABEL[finding.severity]}** \`${finding.filename}\` (${reason}): ${finding.issue}`,
+              `- **${SEVERITY_LABEL[finding.severity]}** \`${finding.filename}\` (${reason}): ${neutralizeMentions(finding.issue)}`,
           )
           .join('\n') +
         '\n\n</details>',
