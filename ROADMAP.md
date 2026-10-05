@@ -1208,15 +1208,73 @@ checklist items above are addressed on `phase-16-sec-impl`; the branch
 still needs a PR and merge to `main`.
 
 ## Phase 17: Reliability
-- [ ] Retry policies
-- [ ] Dead-letter jobs
-- [ ] Duplicate webhook handling
-- [ ] Stuck-job recovery
-- [ ] Model timeout handling
-- [ ] GitHub timeout handling
-- [ ] DB retry
-- [ ] Graceful shutdown
-- [ ] Worker concurrency controls
+- [x] Retry policies - fixed a real bug, not just added config: BullMQ's
+      `attempts: 3` was silently inert for review jobs (claimReviewJob only
+      claims PENDING rows, but every failure path immediately marked the
+      row FAILED/left it RUNNING, so a BullMQ retry's claim always missed
+      and the "retry" was recorded as a no-op success). processReviewJob
+      now receives `{ attemptsMade, maxAttempts }` and classifies failures
+      as transient (GitHub 5xx/timeout, Postgres connection-class) vs
+      permanent; a transient failure with attempts left releases the row
+      back to PENDING and rethrows so BullMQ's retry can actually reclaim
+      it; a permanent one throws UnrecoverableError so remaining attempts
+      aren't wasted.
+- [x] Dead-letter jobs - a transient failure that exhausts every BullMQ
+      attempt is marked FAILED with errorCode RETRIES_EXHAUSTED (distinct
+      from UNEXPECTED_ERROR); the `failed` handler logs a distinct
+      "dead-lettered" line once attemptsMade reaches the configured max.
+      BullMQ's own 7-day failed-job retention (review-queue.ts's
+      `removeOnFail`) serves as the dead-letter store - a separate queue
+      wasn't needed.
+- [x] Duplicate webhook handling - already solid before this phase:
+      `recordWebhookEvent`'s `onConflictDoNothing` on a unique
+      `githubEventId` dedupes atomically at the DB level; confirmed by
+      `tests/integration/webhooks.test.ts`'s "a redelivered event does not
+      create a second job".
+- [x] Stuck-job recovery - the existing sweep only found PENDING rows with
+      no queue entry; a worker that crashed outright (OOM, SIGKILL)
+      mid-attempt left its row RUNNING forever, invisible to that sweep and
+      unreachable by claimReviewJob. A second sweep
+      (`findStaleRunningReviewJobs`) now finds RUNNING rows past
+      `ACTIVE_JOB_WINDOW_MS`, confirms against BullMQ's own job state
+      (skips one still genuinely active, removes a stale leftover before
+      re-adding), then releases and re-enqueues it.
+- [x] Model timeout handling - already done in Phase 10
+      (`llm/http-policy.ts`'s per-attempt `AbortSignal`-based timeout).
+- [x] GitHub timeout handling - neither `fetch` nor Octokit had a timeout of
+      their own; a hung GitHub call could block a worker's job slot (and
+      its BullMQ lock) indefinitely. `github/client.ts` now wraps every
+      call with a 20s default ceiling. Along the way: confirmed
+      `AbortSignal.timeout`'s internal timer is unref'd and can simply
+      never fire in a low-activity process (reproduced directly, not
+      hypothetical) - fixed with a plain ref'd `setTimeout` instead. Also
+      disabled `@octokit/plugin-retry`, which was otherwise retrying our
+      own timeout (and any GitHub 5xx) three times with up to ~14s of
+      backoff *underneath* the job-level retry above, and unsafely so for
+      a write call (`createReview`/`createIssueComment`) that may have
+      already succeeded on GitHub's side.
+- [x] DB retry - GitHub does not automatically redeliver a failed webhook
+      delivery (confirmed against GitHub's docs), so a transient Postgres
+      failure during the webhook's DB work previously dropped the PR
+      trigger silently, recoverable only by someone manually clicking
+      Redeliver. `db/retry.ts`'s `withDbRetry` (shared `isTransientDbError`
+      SQLSTATE classification, now also used by the retry-policy fix
+      above) wraps both DB-touching calls in the webhook route with a
+      short bounded retry sized to stay inside GitHub's delivery timeout.
+- [x] Graceful shutdown - already done before this phase: both
+      `apps/api` and `apps/worker` handle SIGTERM/SIGINT, closing the
+      HTTP server/queues/consumers/DB/Redis before exiting.
+- [x] Worker concurrency controls - already done before this phase:
+      `REVIEW_CONCURRENCY`/`INDEX_CONCURRENCY` cap BullMQ worker
+      concurrency (default 2).
+
+**Known residual gap, not fixed this phase:** the retry-policy fix covers
+the pipeline's outer catch-all, where every GitHub/DB call before the
+one-shot-vs-agent branch split surfaces. A transient failure from a GitHub
+call made *inside* the agent loop's own tool-call turns (fetching an extra
+file mid-review) still goes through `runAgentBranch`'s own catch, which is
+unconditionally terminal - same class of bug, smaller blast radius (needs a
+mid-agent-loop GitHub failure specifically). Left as a follow-up.
 
 ## Phase 18: Production deployment
 Domain → reverse proxy/LB → API → Queue → Workers → PostgreSQL.
