@@ -1208,28 +1208,121 @@ checklist items above are addressed on `phase-16-sec-impl`; the branch
 still needs a PR and merge to `main`.
 
 ## Phase 17: Reliability
-- [ ] Retry policies
-- [ ] Dead-letter jobs
-- [ ] Duplicate webhook handling
-- [ ] Stuck-job recovery
-- [ ] Model timeout handling
-- [ ] GitHub timeout handling
-- [ ] DB retry
-- [ ] Graceful shutdown
-- [ ] Worker concurrency controls
+- [x] Retry policies - fixed a real bug, not just added config: BullMQ's
+      `attempts: 3` was silently inert for review jobs (claimReviewJob only
+      claims PENDING rows, but every failure path immediately marked the
+      row FAILED/left it RUNNING, so a BullMQ retry's claim always missed
+      and the "retry" was recorded as a no-op success). processReviewJob
+      now receives `{ attemptsMade, maxAttempts }` and classifies failures
+      as transient (GitHub 5xx/timeout, Postgres connection-class) vs
+      permanent; a transient failure with attempts left releases the row
+      back to PENDING and rethrows so BullMQ's retry can actually reclaim
+      it; a permanent one throws UnrecoverableError so remaining attempts
+      aren't wasted.
+- [x] Dead-letter jobs - a transient failure that exhausts every BullMQ
+      attempt is marked FAILED with errorCode RETRIES_EXHAUSTED (distinct
+      from UNEXPECTED_ERROR); the `failed` handler logs a distinct
+      "dead-lettered" line once attemptsMade reaches the configured max.
+      BullMQ's own 7-day failed-job retention (review-queue.ts's
+      `removeOnFail`) serves as the dead-letter store - a separate queue
+      wasn't needed.
+- [x] Duplicate webhook handling - already solid before this phase:
+      `recordWebhookEvent`'s `onConflictDoNothing` on a unique
+      `githubEventId` dedupes atomically at the DB level; confirmed by
+      `tests/integration/webhooks.test.ts`'s "a redelivered event does not
+      create a second job".
+- [x] Stuck-job recovery - the existing sweep only found PENDING rows with
+      no queue entry; a worker that crashed outright (OOM, SIGKILL)
+      mid-attempt left its row RUNNING forever, invisible to that sweep and
+      unreachable by claimReviewJob. A second sweep
+      (`findStaleRunningReviewJobs`) now finds RUNNING rows past
+      `ACTIVE_JOB_WINDOW_MS`, confirms against BullMQ's own job state
+      (skips one still genuinely active, removes a stale leftover before
+      re-adding), then releases and re-enqueues it.
+- [x] Model timeout handling - already done in Phase 10
+      (`llm/http-policy.ts`'s per-attempt `AbortSignal`-based timeout).
+- [x] GitHub timeout handling - neither `fetch` nor Octokit had a timeout of
+      their own; a hung GitHub call could block a worker's job slot (and
+      its BullMQ lock) indefinitely. `github/client.ts` now wraps every
+      call with a 20s default ceiling. Along the way: confirmed
+      `AbortSignal.timeout`'s internal timer is unref'd and can simply
+      never fire in a low-activity process (reproduced directly, not
+      hypothetical) - fixed with a plain ref'd `setTimeout` instead. Also
+      disabled `@octokit/plugin-retry`, which was otherwise retrying our
+      own timeout (and any GitHub 5xx) three times with up to ~14s of
+      backoff *underneath* the job-level retry above, and unsafely so for
+      a write call (`createReview`/`createIssueComment`) that may have
+      already succeeded on GitHub's side.
+- [x] DB retry - GitHub does not automatically redeliver a failed webhook
+      delivery (confirmed against GitHub's docs), so a transient Postgres
+      failure during the webhook's DB work previously dropped the PR
+      trigger silently, recoverable only by someone manually clicking
+      Redeliver. `db/retry.ts`'s `withDbRetry` (shared `isTransientDbError`
+      SQLSTATE classification, now also used by the retry-policy fix
+      above) wraps both DB-touching calls in the webhook route with a
+      short bounded retry sized to stay inside GitHub's delivery timeout.
+- [x] Graceful shutdown - already done before this phase: both
+      `apps/api` and `apps/worker` handle SIGTERM/SIGINT, closing the
+      HTTP server/queues/consumers/DB/Redis before exiting.
+- [x] Worker concurrency controls - already done before this phase:
+      `REVIEW_CONCURRENCY`/`INDEX_CONCURRENCY` cap BullMQ worker
+      concurrency (default 2).
+
+**Known residual gap, not fixed this phase:** the retry-policy fix covers
+the pipeline's outer catch-all, where every GitHub/DB call before the
+one-shot-vs-agent branch split surfaces. A transient failure from a GitHub
+call made *inside* the agent loop's own tool-call turns (fetching an extra
+file mid-review) still goes through `runAgentBranch`'s own catch, which is
+unconditionally terminal - same class of bug, smaller blast radius (needs a
+mid-agent-loop GitHub failure specifically). Left as a follow-up.
 
 ## Phase 18: Production deployment
-Domain → reverse proxy/LB → API → Queue → Workers → PostgreSQL.
-- [ ] Production Docker image
-- [ ] Secrets management
-- [ ] TLS
-- [ ] DB backups
-- [ ] Migrations
-- [ ] Monitoring
-- [ ] Alerting
-- [ ] CI/CD
-- [ ] Rollback strategy
-- [ ] Health checks
+Domain → Render (TLS/LB) → API/Web → Queue → Workers → managed PostgreSQL.
+Full runbook: docs/deployment.md. Render over a raw VM or AWS: covers the
+most items below with the least new infrastructure code, appropriate for
+Phase 19's stated 5-10 repo beta scale.
+- [x] Production Docker image - apps/web is now containerized (it wasn't:
+      no Dockerfile, no `output: 'standalone'`, structurally excluded from
+      the root Dockerfile's build stage before this phase).
+      `docker/api.Dockerfile`, `docker/worker.Dockerfile`,
+      `docker/web.Dockerfile` are what Render actually deploys from -
+      separate from the root Dockerfile's `api`/`worker`/`web` targets
+      because Render's Blueprint has no equivalent of `docker build
+      --target` (confirmed against Render's own docs); all six build in CI.
+- [x] Secrets management - Render's per-service env var dashboard
+      (`sync: false` entries in render.yaml); docs/deployment.md tables
+      every one and its value, including the one that must be
+      byte-identical across two services (`MODEL_CREDENTIALS_MASTER_KEYS`).
+- [x] TLS - Render auto-issues/renews once a custom domain's DNS points at
+      it; no new code, documented in docs/deployment.md.
+- [x] DB backups - Render managed Postgres's automatic daily backups on a
+      paid plan; documented, no new code.
+- [x] Migrations - `coderexic-api`'s `preDeployCommand` runs `node
+      dist/migrate.js` before every deploy; Drizzle tracks applied
+      migrations itself, confirmed idempotent (a no-op once current,
+      matching docker-compose.yml's existing one-shot `migrate` service).
+- [x] Monitoring - scoped to launch size: Render's built-in logs/metrics
+      dashboard, plus `/health` and `/api/health` wired into
+      `healthCheckPath` for `coderexic-api`/`coderexic-web` (Render's
+      Blueprint doesn't support a health check path for a background
+      worker - `coderexic-worker` falls back to Docker's own `HEALTHCHECK`).
+      Scraping the existing Prometheus `/metrics` endpoints into a real
+      dashboard is noted in docs/deployment.md as a Phase 19 refinement,
+      not built now.
+- [x] Alerting - Render's deploy-failure/crash email notifications plus a
+      recommended free external uptime check against the health endpoints,
+      documented in docs/deployment.md. Same Phase 19 scope note as
+      monitoring for anything beyond that.
+- [x] CI/CD - `.github/workflows/ci.yml`'s existing `check` job stays the
+      required merge gate; Render's own git-push-to-`main` trigger handles
+      the deploy step, so no new GitHub Actions deploy job was needed.
+- [x] Rollback strategy - Render's one-click "rollback to a previous
+      deploy" per service; documented, no new code.
+- [x] Health checks - `/health` (api, liveness only) and `/api/health`
+      (web, new - apps/web had no health route at all before this phase)
+      wired into render.yaml; both verified locally by actually running
+      each Docker image and curling the endpoint, not just reading the
+      route handler.
 
 ## Phase 19: Beta
 **Goal:** real users, on 5–10 repos.
