@@ -120,7 +120,7 @@ describe('selectReviewableFiles', () => {
   // this runs on every push with no size-based early exit. Proves the
   // default budget handles that volume quickly and the output stays small
   // regardless of how many files came in.
-  it('handles a 3000-file PR (GitHub\'s own listFiles cap) quickly under the default budget', () => {
+  it("handles a 3000-file PR (GitHub's own listFiles cap) quickly under the default budget", () => {
     const files = Array.from({ length: 3000 }, (_, i) =>
       file({ filename: `src/f${i}.ts`, patch: '@@ -1 +1 @@\n-a\n+b'.repeat(20) }),
     );
