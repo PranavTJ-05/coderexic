@@ -329,6 +329,46 @@ describe('GitHubClient', () => {
     ]);
     await expect(client.createIssueComment(ref, 5, 'x')).rejects.toMatchObject({ status: 403 });
   });
+
+  it('times out a request GitHub never responds to, instead of hanging the job forever', async () => {
+    const hangingFetch: typeof globalThis.fetch = (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.pathname === '/app/installations/99/access_tokens') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              token: 'ghs_fake_installation_token',
+              expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+              permissions: {},
+              repository_selection: 'selected',
+            }),
+            { status: 201, headers: { 'content-type': 'application/json' } },
+          ),
+        );
+      }
+      // A connection that's accepted but never answered: real fetch rejects
+      // with an AbortError once the signal we pass it fires, so the fake
+      // reproduces exactly that, rather than resolving/rejecting on its own.
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          reject(new DOMException('The operation was aborted', 'AbortError'));
+        });
+      });
+    };
+    const app = createGitHubApp({
+      credentials: { appId: 4242, privateKey },
+      logger,
+      fetch: hangingFetch,
+      throttle: false,
+      requestTimeoutMs: 20,
+    });
+    const client = await app.getInstallationClient(99);
+
+    // Octokit's own fetch wrapper catches whatever our custom fetch throws
+    // and re-wraps it as a RequestError before application code ever sees
+    // it, so the message (not the class) is what survives that layer.
+    await expect(client.getPullRequest(ref, 5)).rejects.toThrow(/timed out after 20ms/i);
+  });
 });
 
 describe('shouldRetryRateLimit', () => {
