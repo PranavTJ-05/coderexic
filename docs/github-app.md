@@ -21,8 +21,13 @@ Open <https://github.com/settings/apps/new> and fill in:
 | --- | --- |
 | Contents | Read-only |
 | Pull requests | Read and write |
-| Issues | Read-only |
+| Issues | Read and write |
 | Metadata | Read-only |
+
+Issues needs write: when posting a review fails twice (inline comments,
+then no comments), `publishReview`'s last-resort fallback posts a plain PR
+comment through the Issues API. Read-only here would silently break that
+fallback.
 
 **Subscribe to events:** Pull request, Push, Issue comment. GitHub sends
 `installation` and `installation_repositories` automatically.

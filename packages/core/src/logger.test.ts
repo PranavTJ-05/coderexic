@@ -29,7 +29,7 @@ describe('createLogger', () => {
       {
         apiKey: 'sk-top-level-secret',
         provider: { apiKey: 'sk-nested-secret', name: 'gemini' },
-        github: { privateKey: '-----BEGIN RSA PRIVATE KEY-----', appId: 42 },
+        github: { privateKey: '-----BEGIN RSA PRIVATE KEY-----', appId: 42 }, // gitleaks:allow (header only, no key body - a redaction fixture)
       },
       'calling provider',
     );

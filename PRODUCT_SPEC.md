@@ -104,8 +104,14 @@ Use least privilege.
 | --- | --- |
 | Contents | read |
 | Pull requests | read/write |
-| Issues | read |
+| Issues | read/write |
 | Metadata | read |
+
+Issues needs write, not just read: `publishReview`'s last-resort fallback
+(apps/worker/src/review/publish.ts), used when `createReview` fails twice,
+posts a plain PR comment through the Issues API (GitHub treats a PR as an
+issue for comments). Read-only would make that fallback itself fail, in
+exactly the situation it exists to handle.
 
 **Events:** `pull_request`, `push`, `issue_comment`, `installation`.
 
