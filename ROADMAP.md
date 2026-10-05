@@ -1277,17 +1277,52 @@ unconditionally terminal - same class of bug, smaller blast radius (needs a
 mid-agent-loop GitHub failure specifically). Left as a follow-up.
 
 ## Phase 18: Production deployment
-Domain → reverse proxy/LB → API → Queue → Workers → PostgreSQL.
-- [ ] Production Docker image
-- [ ] Secrets management
-- [ ] TLS
-- [ ] DB backups
-- [ ] Migrations
-- [ ] Monitoring
-- [ ] Alerting
-- [ ] CI/CD
-- [ ] Rollback strategy
-- [ ] Health checks
+Domain → Render (TLS/LB) → API/Web → Queue → Workers → managed PostgreSQL.
+Full runbook: docs/deployment.md. Render over a raw VM or AWS: covers the
+most items below with the least new infrastructure code, appropriate for
+Phase 19's stated 5-10 repo beta scale.
+- [x] Production Docker image - apps/web is now containerized (it wasn't:
+      no Dockerfile, no `output: 'standalone'`, structurally excluded from
+      the root Dockerfile's build stage before this phase).
+      `docker/api.Dockerfile`, `docker/worker.Dockerfile`,
+      `docker/web.Dockerfile` are what Render actually deploys from -
+      separate from the root Dockerfile's `api`/`worker`/`web` targets
+      because Render's Blueprint has no equivalent of `docker build
+      --target` (confirmed against Render's own docs); all six build in CI.
+- [x] Secrets management - Render's per-service env var dashboard
+      (`sync: false` entries in render.yaml); docs/deployment.md tables
+      every one and its value, including the one that must be
+      byte-identical across two services (`MODEL_CREDENTIALS_MASTER_KEYS`).
+- [x] TLS - Render auto-issues/renews once a custom domain's DNS points at
+      it; no new code, documented in docs/deployment.md.
+- [x] DB backups - Render managed Postgres's automatic daily backups on a
+      paid plan; documented, no new code.
+- [x] Migrations - `coderexic-api`'s `preDeployCommand` runs `node
+      dist/migrate.js` before every deploy; Drizzle tracks applied
+      migrations itself, confirmed idempotent (a no-op once current,
+      matching docker-compose.yml's existing one-shot `migrate` service).
+- [x] Monitoring - scoped to launch size: Render's built-in logs/metrics
+      dashboard, plus `/health` and `/api/health` wired into
+      `healthCheckPath` for `coderexic-api`/`coderexic-web` (Render's
+      Blueprint doesn't support a health check path for a background
+      worker - `coderexic-worker` falls back to Docker's own `HEALTHCHECK`).
+      Scraping the existing Prometheus `/metrics` endpoints into a real
+      dashboard is noted in docs/deployment.md as a Phase 19 refinement,
+      not built now.
+- [x] Alerting - Render's deploy-failure/crash email notifications plus a
+      recommended free external uptime check against the health endpoints,
+      documented in docs/deployment.md. Same Phase 19 scope note as
+      monitoring for anything beyond that.
+- [x] CI/CD - `.github/workflows/ci.yml`'s existing `check` job stays the
+      required merge gate; Render's own git-push-to-`main` trigger handles
+      the deploy step, so no new GitHub Actions deploy job was needed.
+- [x] Rollback strategy - Render's one-click "rollback to a previous
+      deploy" per service; documented, no new code.
+- [x] Health checks - `/health` (api, liveness only) and `/api/health`
+      (web, new - apps/web had no health route at all before this phase)
+      wired into render.yaml; both verified locally by actually running
+      each Docker image and curling the endpoint, not just reading the
+      route handler.
 
 ## Phase 19: Beta
 **Goal:** real users, on 5–10 repos.

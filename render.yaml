@@ -1,0 +1,140 @@
+# Render Blueprint (ROADMAP.md Phase 18). Deploy: render.com -> New ->
+# Blueprint -> point at this repo. Full walkthrough, including every
+# `sync: false` secret below and what value it needs: docs/deployment.md.
+#
+# Each service builds from its own docker/*.Dockerfile, not the root
+# Dockerfile - Render's Blueprint builds a Dockerfile's final stage only, no
+# equivalent of `docker build --target` (confirmed against
+# render.com/docs/blueprint-spec and render.com/docs/docker), so the root
+# Dockerfile's three-target file (used by docker-compose.yml and
+# .github/workflows/ci.yml for local dev/CI) can't be deployed as-is here.
+
+databases:
+  - name: coderexic-db
+    plan: 0.1c-256mb
+    databaseName: coderexic
+    user: coderexic
+
+services:
+  # BullMQ's queue state must never be evicted under memory pressure - a
+  # review or index job silently disappearing is worse than Redis refusing
+  # new writes - so `noeviction`, not Render's own default.
+  - name: coderexic-redis
+    type: keyvalue
+    plan: 256mb
+    maxmemoryPolicy: noeviction
+
+  - name: coderexic-api
+    type: web
+    runtime: docker
+    dockerfilePath: ./docker/api.Dockerfile
+    dockerContext: .
+    plan: 0.5c-512mb
+    healthCheckPath: /health
+    # Drizzle tracks applied migrations itself (packages/core/src/db/migrate.ts),
+    # so running this on every deploy is a no-op once the schema is current -
+    # the same idempotency docker-compose.yml's one-shot `migrate` service
+    # already relies on.
+    preDeployCommand: node dist/migrate.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
+      - key: DATABASE_URL
+        fromDatabase:
+          name: coderexic-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: coderexic-redis
+          type: keyvalue
+          property: connectionString
+      # Must match the webhook secret set on the production GitHub App.
+      - key: GITHUB_WEBHOOK_SECRET
+        sync: false
+      # Optional. Unset means /metrics is never registered (never exposed
+      # unauthenticated by default) - set it to actually use Prometheus
+      # scraping or the uptime check docs/deployment.md recommends.
+      - key: METRICS_TOKEN
+        sync: false
+
+  - name: coderexic-worker
+    type: worker
+    runtime: docker
+    dockerfilePath: ./docker/worker.Dockerfile
+    dockerContext: .
+    plan: 0.5c-512mb
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
+      - key: DATABASE_URL
+        fromDatabase:
+          name: coderexic-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: coderexic-redis
+          type: keyvalue
+          property: connectionString
+      - key: GITHUB_APP_ID
+        sync: false
+      # Raw PEM, not a file path - Render's filesystem isn't persistent
+      # across deploys (packages/core/src/github/config.ts supports both;
+      # this is the only one that works here).
+      - key: GITHUB_PRIVATE_KEY
+        sync: false
+      - key: MODEL_PROVIDER
+        value: gemini
+      - key: GEMINI_API_KEY
+        sync: false
+      # Optional (BYOK, Phase 11). If set, MUST be the exact same value as
+      # coderexic-web's own entry below, or every repo-level BYOK credential
+      # becomes undecryptable - see docs/deployment.md.
+      - key: MODEL_CREDENTIALS_MASTER_KEYS
+        sync: false
+      - key: MODEL_CREDENTIALS_KEY_VERSION
+        value: '1'
+      - key: METRICS_TOKEN
+        sync: false
+
+  - name: coderexic-web
+    type: web
+    runtime: docker
+    dockerfilePath: ./docker/web.Dockerfile
+    dockerContext: .
+    plan: 0.5c-512mb
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: coderexic-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: coderexic-redis
+          type: keyvalue
+          property: connectionString
+      # The GitHub App's own OAuth client (App settings -> General), not a
+      # separate OAuth App.
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
+        sync: false
+      - key: AUTH_SECRET
+        sync: false
+      # Set to this service's final public URL (custom domain once DNS is
+      # pointed at it, or the onrender.com URL Render assigns before that).
+      # The GitHub App's OAuth callback URL must be set to exactly this
+      # value + /api/auth/callback/github.
+      - key: NEXTAUTH_URL
+        sync: false
+      - key: GITHUB_APP_SLUG
+        sync: false
+      # Must be byte-identical to coderexic-worker's own entry above.
+      - key: MODEL_CREDENTIALS_MASTER_KEYS
+        sync: false
+      - key: MODEL_CREDENTIALS_KEY_VERSION
+        value: '1'

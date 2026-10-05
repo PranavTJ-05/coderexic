@@ -14,7 +14,7 @@
   </a>
   <img src="https://img.shields.io/badge/node-24-339933?logo=node.js&logoColor=white" alt="Node 24">
   <img src="https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white" alt="TypeScript strict">
-  <img src="https://img.shields.io/badge/tests-565%20passing-10b981" alt="565 tests passing">
+  <img src="https://img.shields.io/badge/tests-685%20passing-10b981" alt="685 tests passing">
 </p>
 
 ---
@@ -235,18 +235,19 @@ acknowledgment that it spends real money.
 
 ## Project status
 
-15 of the 22 phases in [ROADMAP.md](ROADMAP.md) are complete: repository
-foundation, database, GitHub App integration, diff review, repo config,
-dependency graph, context engine, agent tools/loop, multi-provider models,
-BYOK, re-review, the web dashboard (auth, browsing, settings), observability
-and the evaluation harness.
+18 of the 22 phases in [ROADMAP.md](ROADMAP.md) are complete (pending
+merge): repository foundation, database, GitHub App integration, diff
+review, repo config, dependency graph, context engine, agent tools/loop,
+multi-provider models, BYOK, re-review, the web dashboard (auth, browsing,
+settings), observability, the evaluation harness, security hardening,
+reliability, and production deployment (Render, [docs/deployment.md](docs/deployment.md)).
 
-As of this commit: **376 unit tests** and **189 integration tests**, all
+As of this commit: **470 unit tests** and **215 integration tests**, all
 passing, plus a 37-case evaluation suite (27 known-bug, 10 false-positive).
 
-Ahead: security hardening, reliability work, and — only once those are
-done — a real production deployment. See [ROADMAP.md](ROADMAP.md) for the
-full phase-by-phase breakdown and what "done" means for each one.
+Ahead: beta on 5-10 real repos, tracking review latency, false positives
+and model cost before adding anything else. See [ROADMAP.md](ROADMAP.md) for
+the full phase-by-phase breakdown and what "done" means for each one.
 
 ## Layout
 
@@ -274,6 +275,7 @@ packages/core   Shared code: env, logging, metrics, db, github, queue,
 - [AGENTS.md](AGENTS.md): rules for coding agents and contributors
 - [docs/github-app.md](docs/github-app.md): registering the GitHub App and
   local webhook forwarding
+- [docs/deployment.md](docs/deployment.md): production deployment on Render
 - [docs/dependencies.md](docs/dependencies.md): why each dependency was
   added, and what it would take to remove it
 
