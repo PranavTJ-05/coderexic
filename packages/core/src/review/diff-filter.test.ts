@@ -114,4 +114,22 @@ describe('selectReviewableFiles', () => {
     expect(selected).toHaveLength(2);
     expect(skipped).toHaveLength(3);
   });
+
+  // Phase 16 resource-exhaustion audit: GitHub itself caps listFiles at
+  // 3000 entries, but nothing stops a fork PR from hitting that cap, and
+  // this runs on every push with no size-based early exit. Proves the
+  // default budget handles that volume quickly and the output stays small
+  // regardless of how many files came in.
+  it('handles a 3000-file PR (GitHub\'s own listFiles cap) quickly under the default budget', () => {
+    const files = Array.from({ length: 3000 }, (_, i) =>
+      file({ filename: `src/f${i}.ts`, patch: '@@ -1 +1 @@\n-a\n+b'.repeat(20) }),
+    );
+    const start = performance.now();
+    const { files: selected, skipped } = selectReviewableFiles(files);
+    const elapsedMs = performance.now() - start;
+
+    expect(elapsedMs).toBeLessThan(500);
+    expect(selected.length).toBeLessThanOrEqual(DEFAULT_DIFF_BUDGET.maxFiles);
+    expect(selected.length + skipped.length).toBe(3000);
+  });
 });

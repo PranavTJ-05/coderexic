@@ -87,6 +87,24 @@ describe('loadRepositoryConfig', () => {
     const result = await loadRepositoryConfig(throwingClient(), REF, SHA);
     expect(result.warnings.length).toBeGreaterThan(0);
   });
+
+  it('rejects a billion-laughs-style YAML alias bomb instead of hanging or exhausting memory', async () => {
+    // Each alias re-expands the one before it; left unbounded this blows up
+    // exponentially (2^30+ nodes here) well before a human would write a
+    // config this deep. A malicious .coderexic.yml on a fork PR could ship
+    // one hoping to freeze or OOM the single-threaded worker.
+    const lines = ['a0: &a0 ["x","x"]'];
+    for (let i = 1; i <= 30; i++) {
+      lines.push(`a${i}: &a${i} [*a${i - 1}, *a${i - 1}]`);
+    }
+    lines.push('min_severity: *a30');
+    const bomb = lines.join('\n');
+
+    const result = await loadRepositoryConfig(fakeClient({ '.coderexic.yml': bomb }), REF, SHA);
+
+    expect(result.warnings.length).toBeGreaterThan(0);
+    expect(result.minSeverity).toBeNull();
+  });
 });
 
 describe('loadRepositoryRules', () => {

@@ -4,6 +4,7 @@
 **/coverage
 .git
 .github
+.claude
 .env
 .env.*
 !.env.example
