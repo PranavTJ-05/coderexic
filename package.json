@@ -11,6 +11,7 @@
     "dev:api": "pnpm --filter @coderexic/api dev",
     "dev:worker": "pnpm --filter @coderexic/worker dev",
     "dev:web": "pnpm --filter @coderexic/web dev",
+    "dev:landing": "pnpm --filter @coderexic/landing dev",
     "db:generate": "pnpm --filter @coderexic/core db:generate",
     "db:migrate": "pnpm --filter @coderexic/api db:migrate",
     "github:smoke": "pnpm --filter @coderexic/api github:smoke",

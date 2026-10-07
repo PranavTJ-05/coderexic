@@ -1,20 +1,7 @@
 import { getServerSession } from 'next-auth/next';
-import { Space_Grotesk, JetBrains_Mono } from 'next/font/google';
 import type { ReactNode } from 'react';
 import { getAuthOptions } from '../src/auth';
-import { AppShell } from '../src/components/app-shell';
 import './globals.css';
-
-const spaceGrotesk = Space_Grotesk({
-  subsets: ['latin'],
-  weight: ['400', '500', '600', '700'],
-  variable: '--font-display',
-});
-const jetbrainsMono = JetBrains_Mono({
-  subsets: ['latin'],
-  weight: ['400', '500', '600'],
-  variable: '--font-mono',
-});
 
 export const metadata = {
   title: 'Coderexic',
@@ -28,9 +15,37 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
   const session = await getServerSession(getAuthOptions());
 
   return (
-    <html lang="en" className={`${spaceGrotesk.variable} ${jetbrainsMono.variable}`}>
+    <html lang="en">
       <body className="min-h-screen bg-[var(--background)] text-[var(--foreground)] antialiased">
-        <AppShell session={session}>{children}</AppShell>
+        <header className="border-b border-[var(--border)]">
+          <div className="mx-auto flex max-w-4xl items-center justify-between px-4 py-3">
+            <a href="/" className="text-sm font-semibold">
+              Coderexic
+            </a>
+            {session ? (
+              <nav className="flex items-center gap-4 text-sm">
+                <a
+                  href="/dashboard"
+                  className="text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                >
+                  Dashboard
+                </a>
+                <span className="text-[var(--muted-foreground)]">{session.user.login}</span>
+                <a
+                  href="/api/auth/signout"
+                  className="text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                >
+                  Sign out
+                </a>
+              </nav>
+            ) : (
+              <a href="/api/auth/signin/github" className="text-sm font-medium">
+                Sign in with GitHub
+              </a>
+            )}
+          </div>
+        </header>
+        <div className="mx-auto max-w-4xl px-4 py-8">{children}</div>
       </body>
     </html>
   );

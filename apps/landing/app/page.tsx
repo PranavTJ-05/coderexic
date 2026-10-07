@@ -1,7 +1,17 @@
 'use client';
 
 import { useEffect } from 'react';
-import './landing.css';
+
+/**
+ * The real app (apps/web, deployed separately on Render) is where
+ * /api/auth/signin/github actually lives - this app has no backend, no
+ * auth, nothing. Both CTA links need the fully-qualified URL, not a
+ * relative path, since they point at a different deployment/domain than
+ * this one. Set NEXT_PUBLIC_APP_URL in Vercel's project settings to the
+ * real deployment's URL (see docs/deployment.md).
+ */
+const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3001';
+const SIGN_IN_URL = `${APP_URL}/api/auth/signin/github`;
 
 const LANGUAGES = ['TypeScript', 'JavaScript', 'Python', 'Go', 'Rust', 'Java', 'Ruby'];
 const PROVIDERS = ['Gemini', 'OpenAI', 'Anthropic', 'Groq'];
@@ -154,14 +164,12 @@ function ShieldIcon() {
 }
 
 /**
- * The marketing landing page at `/` (apps/web/app/page.tsx renders this for
- * signed-out visitors only - a signed-in visitor is redirected to
- * /dashboard before this ever mounts). Ported from the approved design
- * (an artifact shared during planning) into real components; copy mirrors
- * README.md's own Features section so it can't drift from what's actually
- * shipped.
+ * The entire site: a standalone marketing app (deployed on Vercel,
+ * separate from apps/web) with no auth, no session, no backend - every
+ * visitor sees exactly this. Copy mirrors README.md's own Features section
+ * so it can't drift from what's actually shipped.
  */
-export function LandingPage() {
+export default function Home() {
   useEffect(() => {
     const io = new IntersectionObserver(
       (entries) => {
@@ -220,7 +228,7 @@ export function LandingPage() {
               github
             </a>
             <a
-              href="/api/auth/signin/github"
+              href={SIGN_IN_URL}
               className="btn-primary rounded-[10px] px-[18px] py-[9px] text-sm font-semibold no-underline"
             >
               Let&rsquo;s start now
@@ -274,7 +282,7 @@ export function LandingPage() {
 
         <div className="reveal in reveal-d2 mt-9 flex flex-wrap gap-3.5">
           <a
-            href="/api/auth/signin/github"
+            href={SIGN_IN_URL}
             className="btn-primary inline-flex items-center gap-2.5 rounded-xl px-7 py-[15px] text-base font-bold no-underline"
           >
             Let&rsquo;s start now
@@ -589,7 +597,7 @@ export function LandingPage() {
             </p>
             <div className="mt-9 flex flex-wrap justify-center gap-3.5">
               <a
-                href="/api/auth/signin/github"
+                href={SIGN_IN_URL}
                 className="btn-primary inline-flex items-center gap-2.5 rounded-xl px-8 py-[17px] text-[17px] font-bold no-underline"
               >
                 Let&rsquo;s start now

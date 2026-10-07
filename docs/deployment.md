@@ -1,10 +1,14 @@
-# Production deployment (Render)
+# Production deployment (Render + Vercel)
 
-Coderexic deploys to [Render](https://render.com) as three services (`api`,
-`worker`, `web`) plus a managed Postgres database and a managed Redis
-(Key Value) instance, all described in `render.yaml` at the repo root. This
-doc is the runbook: what's automatic once set up, and the one-time manual
-steps Render can't do for you.
+Coderexic deploys as two independent pieces. The application (`api`,
+`worker`, `web`) deploys to [Render](https://render.com) as three services
+plus a managed Postgres database and a managed Redis (Key Value) instance,
+all described in `render.yaml` at the repo root - §1-4 below. The marketing
+site (`apps/landing`) deploys separately to [Vercel](https://vercel.com) -
+§5 - since it has no backend dependency at all and gains nothing from
+living on the same stateful deployment. This doc is the runbook for both:
+what's automatic once set up, and the one-time manual steps each platform
+can't do for you.
 
 ## 1. One-time setup
 
@@ -96,6 +100,38 @@ start:
   Render's own metrics if it adds Prometheus scraping support) is a
   reasonable Phase 19 refinement once there's real traffic worth watching
   closely - not a blocker for getting the first deploy live.
+
+## 5. The marketing site (`apps/landing`) — Vercel, separately
+
+The marketing/landing page is its own app (`apps/landing`), deployed
+**separately from everything above**, on [Vercel](https://vercel.com) - not
+Render, not Docker. It has zero backend dependency (no `@coderexic/core`,
+no DB, no Redis, no auth), so it doesn't belong on the same stateful
+deployment as the dashboard: `pnpm --filter @coderexic/landing build`
+produces an entirely static `/` route with no env vars required at all.
+
+1. **Import the repo into Vercel** (New Project → this GitHub repo). Vercel
+   auto-detects the pnpm workspace; set **Root Directory** to
+   `apps/landing` in the project's settings. No `vercel.json` needed - a
+   plain Next.js app in a pnpm monorepo is zero-config once the root
+   directory is set.
+2. **Set one environment variable**: `NEXT_PUBLIC_APP_URL` → the real
+   app's public URL (the `coderexic-web` Render service from §1 above -
+   its `onrender.com` URL to start, or the custom domain once attached).
+   This is the **only** env var this app reads. Both "Let's start now"
+   CTAs are built as `${NEXT_PUBLIC_APP_URL}/api/auth/signin/github` at
+   build time - a relative link would be wrong once this page is on a
+   different domain than the app itself, so don't skip this step or the
+   buttons silently 404 against Vercel's own domain instead of signing
+   anyone in.
+3. **Custom domain** (optional): add it under the Vercel project's
+   **Domains** tab - TLS is automatic, same as Render.
+
+That's the whole setup. Every push to `main` that touches `apps/landing`
+redeploys it automatically (Vercel's own git integration) - no
+`render.yaml`-equivalent file needed, and nothing in `.github/workflows/
+ci.yml` needs to know about it beyond `pnpm -r build`/`typecheck` already
+picking it up as a workspace package.
 
 ## Why separate `docker/*.Dockerfile` files
 

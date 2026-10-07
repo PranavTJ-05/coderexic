@@ -220,6 +220,7 @@ acknowledgment that it spends real money.
 | `pnpm dev:api`           | Run `apps/api` in watch mode                                  |
 | `pnpm dev:worker`        | Run `apps/worker` in watch mode                               |
 | `pnpm dev:web`           | Run `apps/web` (Next.js dashboard) in watch mode              |
+| `pnpm dev:landing`       | Run `apps/landing` (marketing site) in watch mode             |
 | `pnpm lint`              | ESLint (type-aware) across the workspace                     |
 | `pnpm typecheck`         | `tsc --noEmit` per package; no build needed                  |
 | `pnpm test`              | Unit tests (Vitest, no services needed)                      |
@@ -240,7 +241,8 @@ merge): repository foundation, database, GitHub App integration, diff
 review, repo config, dependency graph, context engine, agent tools/loop,
 multi-provider models, BYOK, re-review, the web dashboard (auth, browsing,
 settings), observability, the evaluation harness, security hardening,
-reliability, and production deployment (Render, [docs/deployment.md](docs/deployment.md)).
+reliability, and production deployment (Render + Vercel,
+[docs/deployment.md](docs/deployment.md)).
 
 As of this commit: **470 unit tests** and **215 integration tests**, all
 passing, plus a 37-case evaluation suite (27 known-bug, 10 false-positive).
@@ -259,6 +261,8 @@ apps/worker     Consumes review jobs and index runs from Redis; calls the
                 graph; exposes its own health/metrics listener
 apps/web        Next.js dashboard: GitHub sign-in, repository list, review
                 history, per-repo settings and BYOK
+apps/landing    Next.js marketing site (deployed separately, on Vercel) -
+                no backend dependency, no env vars beyond the app's URL
 packages/core   Shared code: env, logging, metrics, db, github, queue,
                 llm, review, config, graph, context, agent, crypto,
                 evaluation
